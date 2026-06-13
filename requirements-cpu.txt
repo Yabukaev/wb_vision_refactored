@@ -1,0 +1,4 @@
+# CPU PyTorch build. Installed before requirements.txt so ultralytics reuses it.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision

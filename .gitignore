@@ -1,14 +1,32 @@
-# Secrets
+# Secrets (keep .env.example tracked)
 .env
+.env.*
+!.env.example
 
 # Virtualenv and caches
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/
 
-# Offline wheel cache and model weights
+# IDE / OS
+.idea/
+*.swp
+.DS_Store
+
+# Offline wheel cache and model weights / exports
 wheelhouse/
 *.pt
+*.onnx
+*.engine
+*.weights
+models/
+
+# Training / run artifacts
+runs/
+cache/
+tmp/
 
 # Manual backups (superseded by git)
 backups/

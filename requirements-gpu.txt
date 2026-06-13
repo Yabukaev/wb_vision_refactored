@@ -1,0 +1,6 @@
+# CUDA PyTorch build (CUDA 12.1 wheels). Installed before requirements.txt.
+# Bootstrap falls back to requirements-cpu.txt if this install fails or CUDA is
+# unavailable at runtime (torch then runs on CPU automatically).
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+torchvision

@@ -1,81 +1,121 @@
-# WB Vision Refactored
+# WB Vision
 
-Новый вариант проекта разделён на независимые воркеры:
+Local computer-vision presence system. Reads an RTSP camera, detects people with
+YOLO11 pose, tracks them with stable IDs, maps foot position to floor metres via
+homography calibration, classifies posture/motion/activity, and publishes
+everything to MQTT with **Home Assistant auto-discovery**. Calibration and live
+tuning are done from a browser UI.
 
-- `RtspReader` — отдельный поток чтения RTSP, постоянный reconnect, буфер камеры = 1.
-- `LatestValue` — latest-frame хранилище: кадры заменяются, очередь не растёт, задержка не накапливается.
-- `InferenceWorker` — отдельный поток YOLO/pose inference и трекинга.
-- `UIWorker` — отдельный UI-loop OpenCV: видео, оверлей, кнопки калибровки.
-- `MqttWorker` — отдельный MQTT-поток и очередь публикаций, чтобы сеть не блокировала inference.
-- `ConfigManager` — единая точка загрузки `.env`, YAML-конфига и JSON-калибровки.
-- `CalibrationManager` — homography-калибровка пола, сохранение 4 точек, координаты в метрах.
-- `StableTracker` — стабильные ID с greedy matching по foot-distance + IoU, сглаживание, история.
+Architecture (independent worker threads): `RtspReader` → `LatestValue` (drop-old
+frame buffer) → `InferenceWorker` (YOLO + tracking + geo + MQTT) → `MqttWorker`;
+plus a FastAPI web control UI. See `CHANGELOG.md` for the feature list.
 
-## Быстрый старт на Windows PowerShell
+## Quick start (one command)
 
-```powershell
-cd путь\к\wb_vision_refactored
-copy .env.example .env
-notepad .env
-.\scripts\install.ps1
-.\scripts\run.ps1
-```
-
-Открыть в VS Code:
+**Windows (PowerShell):**
 
 ```powershell
-.\scripts\open_vscode.ps1
+irm https://raw.githubusercontent.com/Yabukaev/wb_vision_refactored/main/scripts/bootstrap.ps1 | iex
 ```
 
-Запуск без GUI:
+**Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Yabukaev/wb_vision_refactored/main/scripts/bootstrap.sh | bash
+```
+
+The bootstrap clones the repo (if needed), creates a virtualenv, **detects an
+NVIDIA GPU** and installs CUDA or CPU PyTorch accordingly, installs the app,
+creates `.env` from the template, and runs a smoke test.
+
+Already have the repo checked out? Just run the script from inside it:
+`./scripts/bootstrap.ps1` or `bash scripts/bootstrap.sh`.
+
+## Configure
+
+Edit `.env` (created from `.env.example`):
+
+| Variable | Meaning |
+|---|---|
+| `RTSP_URL` | Camera stream, e.g. `rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101` |
+| `CAMERA_ID` | Camera id used in MQTT topics |
+| `MQTT_HOST` / `MQTT_PORT` | Broker address |
+| `MQTT_USER` / `MQTT_PASSWORD` | Broker credentials |
+| `MQTT_PREFIX` | MQTT topic prefix (default `frigate`) |
+| `MODEL_PATH` | Pose model file (default `yolo11n-pose.pt`) |
+
+Runtime options (FPS, tracker, web port, person slots, activity) live in
+`configs/config.yaml` and most are also tunable live from the web UI.
+
+## Run
 
 ```powershell
-.\scripts\run_headless.ps1
+.\scripts\serve.ps1     # Windows: start in background (writes .service.pid)
+.\scripts\stop.ps1      # stop
 ```
 
-## Настройка
+```bash
+# Linux/macOS
+. .venv/bin/activate && python -m app.main --config configs/config.yaml
+```
 
-1. В `.env` укажите RTSP и MQTT credentials.
-2. В `configs/config.yaml` настройте FPS inference, модель, размеры окна, MQTT prefix.
-3. Для pose лучше использовать `yolo11n-pose.pt`. Если указать detection-only модель, проект будет работать по bbox, но без keypoints.
+Then open the control UI at **http://localhost:8000** (opens automatically on
+Windows): live video, click-to-calibrate the floor trapezoid, draw zones, tune
+FPS/tracker, and hot-swap pose/object models.
 
-## Калибровка в UI
+## Smoke test
 
-- `CALIBRATE AIM` — кликните точку направления/центра.
-- `CALIBRATE 4 FLOOR POINTS` — кликните 4 точки пола по часовой стрелке:
-  1. ближний левый угол,
-  2. ближний правый,
-  3. дальний правый,
-  4. дальний левый.
-- `Room W` и `Room D` — реальные размеры зоны в метрах.
-- `SAVE CONFIG` — сохранить `data/calibration.json`.
+```bash
+python scripts/smoke_test.py     # imports + config parse, no camera needed
+python -m pytest -q              # full unit test suite
+```
 
-Горячие клавиши:
+## CPU / GPU
 
-- `a` — режим AIM.
-- `f` — режим 4 точек пола.
-- `Esc` — выход.
+The bootstrap picks PyTorch automatically:
 
-## Структура
+- `nvidia-smi` present and working → installs CUDA wheels (`requirements-gpu.txt`).
+- No GPU → CPU wheels (`requirements-cpu.txt`).
+- GPU install fails → automatic fallback to CPU. If CUDA is unavailable at
+  runtime, PyTorch silently runs on CPU.
+
+`requirements.txt` holds the framework-agnostic deps; PyTorch is installed first
+from the CPU/GPU file so ultralytics reuses it.
+
+## Models
+
+Weights are **not** committed (`*.pt` is git-ignored). `yolo11n-pose.pt` and
+`yolo11n.pt` download on first use. For hot-swap, drop extra weights into
+`models/` (e.g. `yolo11s/m-pose.pt`, `yolo11s/m.pt`) — they appear in the web
+dropdowns. To pre-fetch:
+
+```bash
+python -c "from ultralytics.utils.downloads import attempt_download_asset as g; [g('models/'+n) for n in ['yolo11s-pose.pt','yolo11m-pose.pt','yolo11s.pt','yolo11m.pt']]"
+```
+
+## Home Assistant
+
+With MQTT configured, the service publishes discovery configs so a device
+**“WB Vision <camera_id>”** appears automatically with: presence, people count,
+FPS/CPU/RAM, and `Person 1..N` entities whose attributes carry pose, motion,
+activity, zone and `x_norm/y_norm` (0..1) for a floorplan card. Zone polygons
+(pixels + metres + normalised) are published retained at `<prefix>/<cam>/zones`.
+
+## Known limitations
+
+- Single camera; MQTT prefix targets Home Assistant.
+- Distance model assumes the camera is roughly above the AIM point (angled wall
+  mounts are approximate).
+- Activity classification is limited to the object model's classes (COCO by
+  default) near a person; small items need a larger `Class imgsz` / model.
+- CPU inference is the bottleneck; `inference_fps` is capped accordingly.
+
+## Project layout
 
 ```text
-app/
-  main.py
-  config.py
-  types.py
-  core/latest_value.py
-  camera/rtsp_reader.py
-  vision/calibration.py
-  vision/detector.py
-  vision/tracker.py
-  vision/inference_worker.py
-  vision/overlay.py
-  mqtt/mqtt_worker.py
-  ui/ui_worker.py
-configs/config.yaml
-data/calibration.json
-scripts/*.ps1
-.vscode/tasks.json
-.vscode/launch.json
+app/            core service (camera, vision, mqtt, web, config)
+configs/        config.yaml
+data/           calibration.json (runtime state)
+scripts/        bootstrap / serve / stop / smoke_test
+tests/          pytest suite
 ```
-
