@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from app.camera.rtsp_reader import RtspReader
@@ -17,6 +19,22 @@ from app.vision.inference_worker import InferenceWorker
 from app.vision.tracker import StableTracker
 
 
+log = logging.getLogger("main")
+
+
+def setup_logging() -> None:
+    log_dir = Path.cwd() / "logs"
+    log_dir.mkdir(exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            RotatingFileHandler(log_dir / "app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8"),
+        ],
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WB Vision refactored RTSP/YOLO/MQTT app")
     parser.add_argument("--config", default="configs/config.yaml", help="Path to YAML config")
@@ -26,7 +44,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    config = ConfigManager(args.config)
+    setup_logging()
+    try:
+        config = ConfigManager(args.config)
+    except (FileNotFoundError, ValueError) as exc:
+        log.error("Config error: %s", exc)
+        return 2
     settings = config.get()
 
     stop_event = threading.Event()
@@ -57,11 +80,11 @@ def main() -> int:
         reader_fps_getter=lambda: rtsp_reader.stats.fps,
     )
 
-    print("START")
-    print(f"CONFIG: {Path(args.config).resolve()}")
-    print(f"CAMERA: {settings.camera.id}")
-    print(f"MODEL: {settings.vision.model_path}")
-    print(f"UI: {'off' if args.headless or not settings.ui.enabled else 'on'}")
+    log.info("START")
+    log.info("CONFIG: %s", Path(args.config).resolve())
+    log.info("CAMERA: %s", settings.camera.id)
+    log.info("MODEL: %s", settings.vision.model_path)
+    log.info("UI: %s", "off" if args.headless or not settings.ui.enabled else "on")
 
     mqtt_worker.start()
     rtsp_reader.start()
@@ -79,7 +102,7 @@ def main() -> int:
         results.close()
         for worker in (rtsp_reader, inference_worker, mqtt_worker):
             worker.join(timeout=3.0)
-        print("STOP")
+        log.info("STOP")
     return 0
 
 
