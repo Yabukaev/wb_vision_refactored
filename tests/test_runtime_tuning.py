@@ -17,6 +17,12 @@ def test_apply_activity_det_fps():
     assert a.det_fps == 5.0
 
 
+def test_det_imgsz_is_int():
+    v, t, a = VisionSection(), TrackerSection(), ActivitySection()
+    apply_tuning(v, t, "det_imgsz", 1536.4, activity=a)
+    assert a.det_imgsz == 1536 and isinstance(a.det_imgsz, int)
+
+
 def test_activity_keys_skipped_without_section():
     v, t = _cfgs()
     d = get_tuning(v, t, None)

@@ -62,8 +62,10 @@ calibration:
 activity:
   enabled: true            # run object-detection classification (phone/book/eating/...)
   det_model_path: yolo11n.pt
-  det_conf: 0.30
+  det_conf: 0.25
   det_fps: 2.0
+  det_imgsz: 1280          # >640 so small items (phone/book/cup) are detected on hi-res
+  assoc_margin_ratio: 0.6  # object-to-person association margin (fraction of bbox size)
   clip_enabled: false
   clip_model: openai/clip-vit-base-patch32
   clip_fps: 0.5

@@ -35,6 +35,8 @@ TUNABLES: dict[str, TuneSpec] = {
     # Classification (activity) model — how often the action request runs:
     "det_fps":           TuneSpec("activity", "det_fps",          "float", 0.2, 10.0, "Class FPS",     0.1),
     "det_conf":          TuneSpec("activity", "det_conf",         "float", 0.05, 0.9, "Class conf",    0.01),
+    "det_imgsz":         TuneSpec("activity", "det_imgsz",        "int",   320, 1920, "Class imgsz",   32),
+    "assoc_margin":      TuneSpec("activity", "assoc_margin_ratio", "float", 0.1, 2.0, "Assoc margin", 0.05),
 }
 
 

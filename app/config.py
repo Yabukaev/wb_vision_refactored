@@ -153,6 +153,8 @@ class ActivitySection:
     det_model_path: str = "yolo11n.pt"
     det_conf: float = 0.30
     det_fps: float = 2.0
+    det_imgsz: int = 1280            # object-detector input size (small items need >640)
+    assoc_margin_ratio: float = 0.6  # object-to-person margin as a fraction of bbox size
     clip_enabled: bool = False
     clip_model: str = "openai/clip-vit-base-patch32"
     clip_fps: float = 0.5

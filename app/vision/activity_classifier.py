@@ -89,7 +89,10 @@ class ObjectDetector:
             return self._cached
         self._last_run_ts = now
         try:
-            results = self._model(image, conf=float(self._cfg.det_conf), verbose=False)
+            results = self._model(
+                image, conf=float(self._cfg.det_conf),
+                imgsz=int(self._cfg.det_imgsz), verbose=False,
+            )
             detections: list[dict] = []
             for r in results:
                 for box in r.boxes:
@@ -106,13 +109,20 @@ class ObjectDetector:
 
 
 class ActivityRules:
-    def classify(self, track: TrackSnapshot, objects: list[dict]) -> str:
-        _fx, fy = track.foot
-        cx, _cy = track.center
+    def classify(self, track: TrackSnapshot, objects: list[dict], margin_ratio: float = 0.6) -> str:
+        # Associate objects with a person by their bounding box plus a margin
+        # scaled to the person's size — resolution-independent, unlike a fixed
+        # pixel radius.
+        bx1, by1, bx2, by2 = track.box
+        bw = max(1.0, float(bx2 - bx1))
+        bh = max(1.0, float(by2 - by1))
+        margin = float(margin_ratio) * max(bw, bh)
+        x1, y1, x2, y2 = bx1 - margin, by1 - margin, bx2 + margin, by2 + margin
+
         nearby: list[str] = []
         for obj in objects:
-            dist = ((obj["cx"] - cx) ** 2 + (obj["cy"] - fy) ** 2) ** 0.5
-            if dist < 200:
+            ocx, ocy = obj["cx"], obj["cy"]
+            if x1 <= ocx <= x2 and y1 <= ocy <= y2:
                 label = obj["label"]
                 if label in _OBJECT_TO_ACTIVITY:
                     nearby.append(_OBJECT_TO_ACTIVITY[label])
@@ -264,7 +274,7 @@ class ActivityClassifier:
         clip_label = self._clip.classify(image, now) if self._clip is not None else ""
         result: dict[int, str] = {}
         for tr in tracks:
-            activity = self._rules.classify(tr, objects)
+            activity = self._rules.classify(tr, objects, self._cfg.assoc_margin_ratio)
             if not activity and clip_label:
                 activity = clip_label
             result[tr.track_id] = activity
