@@ -6,6 +6,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 import cv2
 
@@ -14,6 +15,18 @@ from app.core.latest_value import LatestValue
 from app.types import FramePacket
 
 log = logging.getLogger("rtsp")
+
+
+def _safe_url(url: str) -> str:
+    """Return URL with credentials redacted for safe logging."""
+    try:
+        p = urlparse(url)
+        if p.password:
+            netloc = f"{p.hostname}:{p.port}" if p.port else (p.hostname or "")
+            return urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        pass
+    return "<rtsp-url>"
 
 
 @dataclass(slots=True)
@@ -91,7 +104,7 @@ class RtspReader(threading.Thread):
         if not self.stats.connected:
             err = "cannot open RTSP"
             self.stats.last_error = err
-            log.warning("RTSP connect failed: %s — %s", err, self.camera.rtsp_url)  # B-08
+            log.warning("RTSP connect failed: %s — %s", err, _safe_url(self.camera.rtsp_url))  # B-08
 
     def _release(self) -> None:
         if self._cap is not None:
