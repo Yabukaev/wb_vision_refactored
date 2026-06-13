@@ -62,6 +62,17 @@ def test_distance_from_camera(manager):
     assert geo.distance_cam_m == pytest.approx(2.0, abs=1e-3)  # straight down: just height
 
 
+def test_cam_to_aim_overrides_height(manager):
+    _calibrate_square(manager)
+    manager.set_aim(50, 50)                   # AIM -> floor centre (1,1) m
+    manager.set_value("camera_height_m", 2.0)
+    manager.set_value("cam_to_aim_m", 3.0)    # measured laser distance to AIM
+    geo = manager.pixel_to_floor(50, 50)      # foot at AIM -> floor dist 0
+    assert geo is not None
+    # straight down at the AIM spot -> camera distance equals the measured value
+    assert geo.distance_cam_m == pytest.approx(3.0, abs=1e-3)
+
+
 def test_emits_debug_log(manager, caplog):
     _calibrate_square(manager)
     with caplog.at_level(logging.DEBUG, logger="calibration"):

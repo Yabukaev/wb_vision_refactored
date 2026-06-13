@@ -38,6 +38,7 @@ class CalibrationData:
     world_points: list | None = None    # 4 world corners (derived from room size)
 
     camera_height_m: float = 2.5
+    cam_to_aim_m: float = 0.0           # measured laser distance lens -> AIM (0 = use height)
     camera_pitch_deg: float = 45.0
     camera_yaw_deg: float = 0.0
     camera_roll_deg: float = 0.0
@@ -66,7 +67,8 @@ class CalibrationManager:
 
     NUMERIC_FIELDS = {
         "room_width_m", "room_depth_m",
-        "camera_height_m", "camera_pitch_deg", "camera_yaw_deg", "camera_roll_deg",
+        "camera_height_m", "cam_to_aim_m",
+        "camera_pitch_deg", "camera_yaw_deg", "camera_roll_deg",
         "hfov_deg", "vfov_deg", "rotation_deg",
         "lens_distortion_k1", "lens_distortion_k2",
     }
@@ -214,6 +216,7 @@ class CalibrationManager:
             width = float(self.data.room_width_m)
             depth = float(self.data.room_depth_m)
             cam_h = float(self.data.camera_height_m)
+            cam_to_aim = float(self.data.cam_to_aim_m)
             aim_px = float(self.data.aim_px)
             aim_py = float(self.data.aim_py)
             fp = list(self.data.floor_points or [])
@@ -231,10 +234,12 @@ class CalibrationManager:
         # AIM (camera ground spot) -> floor metres
         ax_m, ay_m = self._project(H, aim_px, aim_py)
 
-        # Floor distance from AIM, and 3D distance from the camera lens
-        # (camera assumed directly above AIM at camera_height_m).
+        # Floor distance from AIM, and 3D distance from the camera lens.
+        # Camera is modelled directly above AIM; its elevation is the measured
+        # laser distance to AIM when provided, otherwise the estimated height.
         dist_floor = math.hypot(x_m - ax_m, y_m - ay_m)
-        dist_cam = math.sqrt(dist_floor * dist_floor + cam_h * cam_h)
+        elev = cam_to_aim if cam_to_aim > 0 else cam_h
+        dist_cam = math.sqrt(dist_floor * dist_floor + elev * elev)
 
         inside_room = 0.0 <= x_m <= width and 0.0 <= y_m <= depth
         inside_cal = (

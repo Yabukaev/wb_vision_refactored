@@ -18,6 +18,7 @@ POSE_EDGES = [
 # camera-distance calculation, so it comes first.
 FIELD_ORDER = [
     ("camera_height_m",   "Cam height, m"),
+    ("cam_to_aim_m",      "Dist to AIM, m"),
     ("room_width_m",      "Room W, m"),
     ("room_depth_m",      "Room D, m"),
     ("camera_pitch_deg",  "Pitch, deg"),
