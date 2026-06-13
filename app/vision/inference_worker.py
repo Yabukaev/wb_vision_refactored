@@ -47,6 +47,7 @@ class InferenceWorker(threading.Thread):
         self._last_health_ts = 0.0
         self._last_tracks_pub_ts = 0.0
         self._prev_done_ts = time.time()
+        self._published_track_ids: set[int] = set()
 
     def run(self) -> None:
         self.detector = YoloPoseDetector(self.vision_cfg)
@@ -108,6 +109,10 @@ class InferenceWorker(threading.Thread):
         publish_tracks = (now - self._last_tracks_pub_ts) >= (1.0 / tracks_hz)
         if publish_tracks:
             self._last_tracks_pub_ts = now
+            current_ids = {tr.track_id for tr in packet.tracks}
+            for gone_id in self._published_track_ids - current_ids:
+                self._publish_gone(gone_id, now)
+            self._published_track_ids = current_ids
             for tr in packet.tracks:
                 self._publish_track(tr, packet.source_width, packet.source_height)
 
@@ -122,6 +127,11 @@ class InferenceWorker(threading.Thread):
             self._mqtt(f"{cid}/health/people_count", len(packet.tracks))
             self._mqtt(f"{cid}/presence", "ON" if packet.tracks else "OFF")
             self._mqtt(f"{cid}/status", "online", retain=True)
+
+    def _publish_gone(self, track_id: int, now: float) -> None:
+        base = f"{self.camera_cfg.id}/person/{track_id}"
+        self._mqtt(f"{base}/state", "gone")
+        self._mqtt(f"{base}/json", json.dumps({"id": track_id, "state": "gone", "ts": now}))
 
     def _publish_track(self, tr: TrackSnapshot, fw: int, fh: int) -> None:
         cid = self.camera_cfg.id
