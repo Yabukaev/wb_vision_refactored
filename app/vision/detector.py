@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 from typing import Optional
@@ -7,6 +7,8 @@ import numpy as np
 
 from app.config import VisionSection
 from app.types import Detection
+
+_KP_CONF_THRESHOLD = 0.25  # B-05: minimum keypoint confidence to treat as valid
 
 
 def foot_from_pose(keypoints: Optional[np.ndarray], box: tuple[int, int, int, int]) -> tuple[int, int]:
@@ -18,19 +20,57 @@ def foot_from_pose(keypoints: Optional[np.ndarray], box: tuple[int, int, int, in
     ankle_pts: list[tuple[float, float]] = []
     for idx in (15, 16):
         if len(keypoints) > idx:
-            x, y = keypoints[idx][:2]
-            if x > 1 and y > 1:
-                ankle_pts.append((float(x), float(y)))
+            kp = keypoints[idx]
+            x, y = float(kp[0]), float(kp[1])
+            # B-05: filter by confidence when available (keypoints.data has 3 cols: x,y,conf)
+            conf = float(kp[2]) if kp.shape[0] > 2 else 1.0
+            if x > 1 and y > 1 and conf >= _KP_CONF_THRESHOLD:
+                ankle_pts.append((x, y))
     if ankle_pts:
         foot_x = int(sum(p[0] for p in ankle_pts) / len(ankle_pts))
         foot_y = int(max(p[1] for p in ankle_pts))
     return foot_x, foot_y
 
 
+def _kp_y(keypoints: np.ndarray, idx: int) -> float | None:
+    """Return y coordinate of keypoint if confidence passes threshold."""
+    if len(keypoints) <= idx:
+        return None
+    kp = keypoints[idx]
+    x, y = float(kp[0]), float(kp[1])
+    conf = float(kp[2]) if kp.shape[0] > 2 else 1.0
+    return y if (x > 1 and y > 1 and conf >= _KP_CONF_THRESHOLD) else None
+
+
 def state_by_pose(keypoints: Optional[np.ndarray], box: tuple[int, int, int, int]) -> str:
     x1, y1, x2, y2 = box
     w = max(1, x2 - x1)
     h = max(1, y2 - y1)
+
+    # B-06: use body keypoints when confident enough
+    if keypoints is not None and len(keypoints) >= 17:
+        shoulder_ys = [y for i in (5, 6) if (y := _kp_y(keypoints, i)) is not None]
+        hip_ys = [y for i in (11, 12) if (y := _kp_y(keypoints, i)) is not None]
+        ankle_ys = [y for i in (15, 16) if (y := _kp_y(keypoints, i)) is not None]
+
+        if shoulder_ys and ankle_ys:
+            sh_y = sum(shoulder_ys) / len(shoulder_ys)
+            an_y = sum(ankle_ys) / len(ankle_ys)
+            body_h = abs(an_y - sh_y)
+
+            # Body compressed vertically relative to bbox height → lying
+            if body_h < h * 0.4:
+                return "lying"
+
+            # Hip close to ankle in proportion to full body height → sitting
+            if hip_ys:
+                hip_y = sum(hip_ys) / len(hip_ys)
+                if body_h > 0 and abs(an_y - hip_y) / body_h < 0.3:
+                    return "sitting"
+
+            return "standing"
+
+    # Fallback: bbox aspect ratio
     ratio = w / h
     if ratio > 1.25:
         return "lying"
@@ -61,7 +101,8 @@ class YoloPoseDetector:
         keypoints_arr = None
         if getattr(res, "keypoints", None) is not None and res.keypoints is not None:
             try:
-                keypoints_arr = res.keypoints.xy.cpu().numpy()
+                # B-05: use .data (x, y, conf per keypoint) instead of .xy (x, y only)
+                keypoints_arr = res.keypoints.data.cpu().numpy()
             except Exception:
                 keypoints_arr = None
         fh, fw = frame.shape[:2]
@@ -79,7 +120,7 @@ class YoloPoseDetector:
         return detections
 
 
-def box_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+def box_iou(a: tuple, b: tuple) -> float:
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
     ix1, iy1 = max(ax1, bx1), max(ay1, by1)
@@ -104,4 +145,3 @@ def suppress_duplicates(dets: list[Detection], foot_dist_px: float, iou_threshol
         if not duplicate:
             kept.append(det)
     return kept
-

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Optional
 
@@ -40,31 +40,35 @@ def _text(
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
-def draw_pose(frame: np.ndarray, keypoints: Optional[np.ndarray]) -> None:
+def draw_pose(frame: np.ndarray, keypoints: Optional[np.ndarray], scale: float = 1.0) -> None:
+    # P-06: scale coordinates when drawing on a resized frame
     if keypoints is None:
         return
 
     for a, b in POSE_EDGES:
         if len(keypoints) > max(a, b):
-            ax, ay = int(keypoints[a][0]), int(keypoints[a][1])
-            bx, by = int(keypoints[b][0]), int(keypoints[b][1])
+            ax = int(keypoints[a][0] * scale)
+            ay = int(keypoints[a][1] * scale)
+            bx = int(keypoints[b][0] * scale)
+            by = int(keypoints[b][1] * scale)
             if ax > 1 and ay > 1 and bx > 1 and by > 1:
                 cv2.line(frame, (ax, ay), (bx, by), (0, 220, 255), 2, cv2.LINE_AA)
 
     for p in keypoints:
-        x, y = int(p[0]), int(p[1])
+        x, y = int(p[0] * scale), int(p[1] * scale)
         if x > 1 and y > 1:
             cv2.circle(frame, (x, y), 3, (255, 0, 255), -1, cv2.LINE_AA)
 
 
-def draw_calibration(frame: np.ndarray, cal: CalibrationData) -> None:
-    ax, ay = int(cal.aim_px), int(cal.aim_py)
+def draw_calibration(frame: np.ndarray, cal: CalibrationData, scale: float = 1.0) -> None:
+    # P-06: scale calibration coordinates to match resized frame
+    ax, ay = int(cal.aim_px * scale), int(cal.aim_py * scale)
 
     cv2.drawMarker(frame, (ax, ay), (0, 0, 255), cv2.MARKER_CROSS, 28, 2, cv2.LINE_AA)
     cv2.circle(frame, (ax, ay), 7, (0, 0, 255), 2, cv2.LINE_AA)
     _text(frame, "AIM", (ax + 12, ay - 10), 0.55, (0, 0, 255), 2)
 
-    pts = [(int(p[0]), int(p[1])) for p in (cal.floor_points or [])]
+    pts = [(int(p[0] * scale), int(p[1] * scale)) for p in (cal.floor_points or [])]
 
     if len(pts) >= 2:
         for i in range(1, len(pts)):
@@ -81,20 +85,32 @@ def draw_calibration(frame: np.ndarray, cal: CalibrationData) -> None:
         _text(frame, str(i + 1), (p[0] + 10, p[1] - 8), 0.55, (255, 255, 255), 2)
 
 
-def draw_tracks(frame: np.ndarray, tracks: list[TrackSnapshot], show_pose: bool = True, show_tracks: bool = True) -> None:
+def draw_tracks(
+    frame: np.ndarray,
+    tracks: list[TrackSnapshot],
+    scale: float = 1.0,
+    show_pose: bool = True,
+    show_tracks: bool = True,
+) -> None:
+    # P-06: scale all track coordinates to match resized frame
     for tr in tracks:
         if show_pose:
-            draw_pose(frame, tr.keypoints)
+            draw_pose(frame, tr.keypoints, scale)
 
-        x1, y1, x2, y2 = tr.box
+        x1 = int(tr.box[0] * scale)
+        y1 = int(tr.box[1] * scale)
+        x2 = int(tr.box[2] * scale)
+        y2 = int(tr.box[3] * scale)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (20, 190, 60), 2, cv2.LINE_AA)
 
-        fx, fy = tr.foot
+        fx = int(tr.foot[0] * scale)
+        fy = int(tr.foot[1] * scale)
         cv2.circle(frame, (fx, fy), 6, (0, 0, 255), -1, cv2.LINE_AA)
 
         if show_tracks:
-            for i in range(1, len(tr.history)):
-                cv2.line(frame, tr.history[i - 1], tr.history[i], (0, 230, 255), 2, cv2.LINE_AA)
+            scaled_history = [(int(p[0] * scale), int(p[1] * scale)) for p in tr.history]
+            for i in range(1, len(scaled_history)):
+                cv2.line(frame, scaled_history[i - 1], scaled_history[i], (0, 230, 255), 2, cv2.LINE_AA)
 
         txt = f"ID {tr.track_id} {tr.state} {tr.conf:.2f}"
         if tr.geo:

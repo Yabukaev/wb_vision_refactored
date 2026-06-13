@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import math
 import time
@@ -13,27 +13,32 @@ from app.types import Detection, GeoPoint, TrackSnapshot
 from app.vision.detector import box_iou
 
 
-def _smooth_point(old: tuple[int, int], new: tuple[int, int], alpha: float) -> tuple[int, int]:
-    return (int(old[0] * alpha + new[0] * (1.0 - alpha)), int(old[1] * alpha + new[1] * (1.0 - alpha)))
+def _smooth_point(old: tuple[float, float], new: tuple[float, float], alpha: float) -> tuple[float, float]:
+    # B-16: track as float to avoid truncation drift; convert to int only at snapshot export
+    return (old[0] * alpha + new[0] * (1.0 - alpha), old[1] * alpha + new[1] * (1.0 - alpha))
 
 
-def _smooth_box(old: tuple[int, int, int, int], new: tuple[int, int, int, int], alpha: float) -> tuple[int, int, int, int]:
-    return tuple(int(old[i] * alpha + new[i] * (1.0 - alpha)) for i in range(4))  # type: ignore[return-value]
+def _smooth_box(
+    old: tuple[float, float, float, float],
+    new: tuple[float, float, float, float],
+    alpha: float,
+) -> tuple[float, float, float, float]:
+    return tuple(old[i] * alpha + new[i] * (1.0 - alpha) for i in range(4))  # type: ignore[return-value]
 
 
 @dataclass
 class _Track:
     track_id: int
-    box: tuple[int, int, int, int]
+    box: tuple[float, float, float, float]   # B-16: float coords internally
     conf: float
-    foot: tuple[int, int]
-    center: tuple[int, int]
+    foot: tuple[float, float]                # B-16
+    center: tuple[float, float]              # B-16
     state: str
     keypoints: Optional[np.ndarray]
     first_seen: float
     last_seen: float
     hits: int = 1
-    history: deque[tuple[int, int]] = field(default_factory=deque)
+    history: deque[tuple[float, float]] = field(default_factory=deque)  # B-16
     state_history: deque[str] = field(default_factory=lambda: deque(maxlen=7))
 
 
@@ -78,7 +83,7 @@ class StableTracker:
             else:
                 self._create_track(det, now)
 
-        self._drop_expired(now)
+        # B-13: removed redundant second _drop_expired call here
         return self.snapshots(now=now, geo_fn=geo_fn)
 
     def snapshots(self, now: Optional[float] = None, geo_fn=None) -> list[TrackSnapshot]:
@@ -92,15 +97,16 @@ class StableTracker:
             out.append(
                 TrackSnapshot(
                     track_id=tr.track_id,
-                    box=tr.box,
+                    # B-16: convert float → int only at export
+                    box=(int(tr.box[0]), int(tr.box[1]), int(tr.box[2]), int(tr.box[3])),
                     conf=tr.conf,
-                    foot=tr.foot,
-                    center=tr.center,
+                    foot=(int(tr.foot[0]), int(tr.foot[1])),
+                    center=(int(tr.center[0]), int(tr.center[1])),
                     state=tr.state,
                     last_seen=tr.last_seen,
                     hits=tr.hits,
                     age_sec=max(0.0, now - tr.first_seen),
-                    history=list(tr.history),
+                    history=[(int(p[0]), int(p[1])) for p in tr.history],
                     keypoints=tr.keypoints,
                     geo=geo,
                 )
@@ -112,25 +118,25 @@ class StableTracker:
         self._next_id += 1
         tr = _Track(
             track_id=tid,
-            box=det.box,
+            box=(float(det.box[0]), float(det.box[1]), float(det.box[2]), float(det.box[3])),
             conf=det.conf,
-            foot=det.foot,
-            center=det.center,
+            foot=(float(det.foot[0]), float(det.foot[1])),
+            center=(float(det.center[0]), float(det.center[1])),
             state=det.state,
             keypoints=det.keypoints,
             first_seen=now,
             last_seen=now,
         )
-        tr.history = deque([det.foot], maxlen=int(self.cfg.max_history))
+        tr.history = deque([(float(det.foot[0]), float(det.foot[1]))], maxlen=int(self.cfg.max_history))
         tr.state_history.append(det.state)
         self._tracks[tid] = tr
 
     def _update_track(self, tid: int, det: Detection, now: float) -> None:
         tr = self._tracks[tid]
         alpha = float(self.cfg.smoothing)
-        tr.box = _smooth_box(tr.box, det.box, alpha)
-        tr.foot = _smooth_point(tr.foot, det.foot, alpha)
-        tr.center = _smooth_point(tr.center, det.center, alpha)
+        tr.box = _smooth_box(tr.box, (float(det.box[0]), float(det.box[1]), float(det.box[2]), float(det.box[3])), alpha)
+        tr.foot = _smooth_point(tr.foot, (float(det.foot[0]), float(det.foot[1])), alpha)
+        tr.center = _smooth_point(tr.center, (float(det.center[0]), float(det.center[1])), alpha)
         tr.conf = float(alpha * tr.conf + (1.0 - alpha) * det.conf)
         tr.keypoints = det.keypoints
         tr.last_seen = now
@@ -144,4 +150,3 @@ class StableTracker:
         for tid in list(self._tracks):
             if now - self._tracks[tid].last_seen > keep_sec:
                 del self._tracks[tid]
-
