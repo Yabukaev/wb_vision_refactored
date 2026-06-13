@@ -9,6 +9,7 @@ import numpy as np
 from app.config import UISection
 from app.core.latest_value import LatestValue
 from app.types import FramePacket, VisionPacket
+from app.vision.activity_classifier import ActivityClassifier
 from app.vision.calibration import (
     CAL_MODE_HYBRID, CAL_MODE_LASER, CAL_MODE_XY, CAL_MODES,
     CalibrationData, CalibrationManager, mode_entry_fields,
@@ -26,12 +27,14 @@ class UIWorker:
         results: LatestValue[VisionPacket],
         calibration: CalibrationManager,
         stop_event: threading.Event,
+        activity: Optional[ActivityClassifier] = None,
     ) -> None:
         self.ui_cfg = ui_cfg
         self.frames = frames
         self.results = results
         self.calibration = calibration
         self.stop_event = stop_event
+        self.activity = activity
 
         self.window_name = "VISION STABLE"
 
@@ -189,6 +192,8 @@ class UIWorker:
             "point_entry_values": {k: str(v) for k, v in self.point_entry_values.items()},
             "cal_points": cal.cal_points or [],
             "hybrid_errors": hybrid_errors,
+            "activity_enabled": self.activity.is_enabled if self.activity else False,
+            "activity_available": self.activity is not None,
         }
 
         draw_panel(
@@ -243,16 +248,21 @@ class UIWorker:
 
         # Normal commands
         if low == 27:
+            if self.point_pick_active or self.aim_mode:
+                self.point_pick_active = False
+                self.aim_mode = False
+                print("Cancelled")
+                return False
             return True
         if low in (ord("a"), ord("A")):
             self.aim_mode = True
             self.point_pick_active = False
-            print("Кликните точку AIM на полу")
+            print("Click AIM point on floor in video")
         elif low in (ord("f"), ord("F")):
             self._start_point_pick()
         elif low in (ord("s"), ord("S")):
             self.calibration.save()
-            print("Калибровка сохранена")
+            print("Calibration saved")
         elif low in (ord("p"), ord("P")):
             self.ui_cfg.show_pose = not self.ui_cfg.show_pose
         elif low in (ord("t"), ord("T")):
@@ -348,7 +358,12 @@ class UIWorker:
         elif name == "mode_hybrid":
             self.calibration.set_cal_mode(CAL_MODE_HYBRID)
             self._point_entry_cancel()
-            print("Режим: Гибрид")
+            print("Mode: Hybrid")
+
+        elif name == "toggle_activity":
+            if self.activity is not None:
+                enabled = self.activity.toggle_enabled()
+                print(f"Activity classifier: {'ON' if enabled else 'OFF'}")
 
     # ── point entry helpers ────────────────────────────────────────────────────
 

@@ -113,7 +113,10 @@ def main() -> int:
 
     try:
         if args.debug and settings.ui.enabled:
-            UIWorker(settings.ui, frames, results, calibration, stop_event).run()
+            UIWorker(
+                settings.ui, frames, results, calibration, stop_event,
+                activity=inference_worker.activity_classifier,
+            ).run()
         else:
             while not stop_event.is_set():
                 time.sleep(0.5)

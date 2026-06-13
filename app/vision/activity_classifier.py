@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from typing import Optional
 
@@ -105,8 +107,8 @@ class ObjectDetector:
 
 class ActivityRules:
     def classify(self, track: TrackSnapshot, objects: list[dict]) -> str:
-        fx, fy = track.foot
-        cx, cy = track.center
+        _fx, fy = track.foot
+        cx, _cy = track.center
         nearby: list[str] = []
         for obj in objects:
             dist = ((obj["cx"] - cx) ** 2 + (obj["cy"] - fy) ** 2) ** 0.5
@@ -123,12 +125,17 @@ class ActivityRules:
 
 
 class ClipClassifier:
+    """Async CLIP classifier — runs in a daemon thread so it never blocks the inference loop."""
+
     def __init__(self, cfg: ActivitySection) -> None:
         self._cfg = cfg
         self._model = None
         self._processor = None
-        self._last_run_ts: float = 0.0
+        self._last_submit_ts: float = 0.0
         self._cached: str = ""
+        self._cache_lock = threading.Lock()
+        self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=1)
+        self._thread: Optional[threading.Thread] = None
 
     def load(self) -> None:
         try:
@@ -136,16 +143,24 @@ class ClipClassifier:
             self._model = CLIPModel.from_pretrained(self._cfg.clip_model)
             self._processor = CLIPProcessor.from_pretrained(self._cfg.clip_model)
             log.info("ClipClassifier loaded: %s", self._cfg.clip_model)
+            self._thread = threading.Thread(target=self._worker, name="clip-worker", daemon=True)
+            self._thread.start()
         except Exception as exc:
             log.warning("ClipClassifier not available: %s", exc)
 
-    def classify(self, image: np.ndarray, now: float) -> str:
+    def _worker(self) -> None:
+        while True:
+            try:
+                image = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            result = self._run(image)
+            with self._cache_lock:
+                self._cached = result
+
+    def _run(self, image: np.ndarray) -> str:
         if self._model is None or self._processor is None:
             return ""
-        min_interval = 1.0 / max(0.1, float(self._cfg.clip_fps))
-        if now - self._last_run_ts < min_interval:
-            return self._cached
-        self._last_run_ts = now
         try:
             from PIL import Image as PILImage  # type: ignore[import-untyped]
             pil_img = PILImage.fromarray(image[..., ::-1])
@@ -158,29 +173,79 @@ class ClipClassifier:
             probs = outputs.logits_per_image.softmax(dim=1)[0]
             best_idx = int(probs.argmax())
             best_prob = float(probs[best_idx])
-            self._cached = labels[best_idx] if best_prob > 0.4 else ""
+            return labels[best_idx] if best_prob > 0.4 else ""
         except Exception as exc:
             log.debug("ClipClassifier error: %s", exc)
-        return self._cached
+            return ""
+
+    def classify(self, image: np.ndarray, now: float) -> str:
+        """Submit frame asynchronously; return last cached result immediately."""
+        if self._model is None:
+            return ""
+        min_interval = 1.0 / max(0.1, float(self._cfg.clip_fps))
+        if now - self._last_submit_ts >= min_interval:
+            self._last_submit_ts = now
+            img_copy = image.copy()
+            # Drop stale queued frame; always keep latest
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(img_copy)
+            except queue.Full:
+                pass
+        with self._cache_lock:
+            return self._cached
 
 
 class ActivityClassifier:
+    """Facade: object-detection rules + optional async CLIP, with runtime enable/disable."""
+
     def __init__(self, cfg: ActivitySection) -> None:
         self._cfg = cfg
+        self._enabled: bool = cfg.enabled
+        self._load_needed: bool = False   # set True when toggled on before models load
         self._detector = ObjectDetector(cfg)
         self._rules = ActivityRules()
         self._clip: Optional[ClipClassifier] = ClipClassifier(cfg) if cfg.clip_enabled else None
 
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
     def start(self) -> None:
-        if not self._cfg.enabled:
+        """Called by InferenceWorker at startup. Loads models if enabled at launch."""
+        if not self._enabled:
             return
+        self._load_models()
+
+    def _load_models(self) -> None:
         self._detector.load()
         if self._clip is not None:
             self._clip.load()
+        self._load_needed = False
+
+    # ── runtime toggle (UI thread calls this) ─────────────────────────────────
+
+    def toggle_enabled(self) -> bool:
+        self._enabled = not self._enabled
+        if self._enabled and self._detector._model is None:
+            # Models haven't loaded yet — load on next classify() call
+            # (happens in inference thread, safe to block briefly there)
+            self._load_needed = True
+        log.info("Activity classifier %s", "enabled" if self._enabled else "disabled")
+        return self._enabled
+
+    @property
+    def is_enabled(self) -> bool:
+        return self._enabled
+
+    # ── inference ─────────────────────────────────────────────────────────────
 
     def classify(self, image: np.ndarray, tracks: list[TrackSnapshot], now: float) -> dict[int, str]:
-        if not self._cfg.enabled:
+        if not self._enabled:
             return {}
+        if self._load_needed:
+            self._load_models()
         objects = self._detector.detect(image, now)
         clip_label = self._clip.classify(image, now) if self._clip is not None else ""
         result: dict[int, str] = {}
