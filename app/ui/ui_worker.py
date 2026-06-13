@@ -176,12 +176,29 @@ class UIWorker:
             )
 
         canvas[self.off_y:self.off_y + self.draw_h, self.off_x:self.off_x + self.draw_w] = resized
-        cv2.rectangle(
-            canvas,
-            (self.off_x, self.off_y),
-            (self.off_x + self.draw_w - 1, self.off_y + self.draw_h - 1),
-            (70, 70, 75), 1, cv2.LINE_AA,
-        )
+
+        # Video area border — bright when in pick/aim mode to signal "click here"
+        if self.point_pick_active or self.aim_mode:
+            border_col = (0, 210, 255) if self.point_pick_active else (0, 220, 100)
+            cv2.rectangle(
+                canvas,
+                (self.off_x, self.off_y),
+                (self.off_x + self.draw_w - 1, self.off_y + self.draw_h - 1),
+                border_col, 3, cv2.LINE_AA,
+            )
+            hint = "CLICK IN VIDEO TO PLACE POINT" if self.point_pick_active else "CLICK IN VIDEO TO SET AIM"
+            (hw, hh), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            hx = self.off_x + (self.draw_w - hw) // 2
+            hy = self.off_y + self.draw_h - 14
+            cv2.rectangle(canvas, (hx - 6, hy - hh - 6), (hx + hw + 6, hy + 4), (0, 0, 0), -1)
+            cv2.putText(canvas, hint, (hx, hy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, border_col, 2, cv2.LINE_AA)
+        else:
+            cv2.rectangle(
+                canvas,
+                (self.off_x, self.off_y),
+                (self.off_x + self.draw_w - 1, self.off_y + self.draw_h - 1),
+                (70, 70, 75), 1, cv2.LINE_AA,
+            )
 
         self.buttons = {}
         self.fields = {}
@@ -375,11 +392,7 @@ class UIWorker:
             self.aim_mode = False
             print(f"AIM set: ({fx}, {fy})")
 
-        elif self.zone_draw_active and not self.zone_name_mode:
-            self.zone_polygon_px.append([fx, fy])
-            print(f"Zone point {len(self.zone_polygon_px)}: ({fx}, {fy})")
-
-        elif self.point_pick_active:
+        elif self.point_pick_active:  # cal pick has priority over zone draw
             self.pending_px = fx
             self.pending_py = fy
             self.point_pick_active = False
@@ -390,6 +403,10 @@ class UIWorker:
             self.point_entry_values = {}
             n = len(cal.cal_points or []) + 1
             print(f"Point P{n} selected: pixel ({fx}, {fy}). Enter values.")
+
+        elif self.zone_draw_active and not self.zone_name_mode:
+            self.zone_polygon_px.append([fx, fy])
+            print(f"Zone point {len(self.zone_polygon_px)}: ({fx}, {fy})")
 
     def _handle_button(self, name: str) -> None:
         if name == "aim":
@@ -457,10 +474,13 @@ class UIWorker:
     # ── point entry helpers ────────────────────────────────────────────────────
 
     def _start_point_pick(self) -> None:
+        # Reset any half-finished entry FIRST — _point_entry_cancel() clears
+        # point_pick_active, so it must run before we arm pick mode, or the
+        # pick is silently disabled and clicks never place a point.
+        self._point_entry_cancel()
         self.point_pick_active = True
         self.aim_mode = False
         self.editing_key = None
-        self._point_entry_cancel()
         print("Click floor in video to place point")
 
     def _point_entry_advance(self) -> None:
