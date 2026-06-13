@@ -35,3 +35,5 @@ backups/
 logs/
 .service.pid
 data/runtime.json
+# per-machine calibration; app recreates a default
+data/calibration.json
