@@ -56,7 +56,19 @@ class MqttWorker(threading.Thread):
             except queue.Empty:
                 continue
             self._publish(msg)
+
+        # B-01: drain remaining queue so retain=True messages (e.g. status=offline)
+        # enqueued by InferenceWorker just before stop are actually sent.
+        self._drain()
         self._disconnect()
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                msg = self.queue.get_nowait()
+                self._publish(msg)
+            except queue.Empty:
+                break
 
     def _connect(self) -> bool:
         try:
