@@ -176,7 +176,8 @@ class InferenceWorker(threading.Thread):
             payload["geo"] = {
                 "x_m": round(tr.geo.x_m, 3),
                 "y_m": round(tr.geo.y_m, 3),
-                "distance_axis_m": round(tr.geo.distance_m, 3),
+                "distance_floor_m": round(tr.geo.distance_m, 3),
+                "distance_cam_m": round(tr.geo.distance_cam_m, 3),
                 "inside_room": tr.geo.inside_room,
                 "inside_calibration_zone": tr.geo.inside_calibration_zone,
             }

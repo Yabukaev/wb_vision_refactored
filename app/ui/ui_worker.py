@@ -9,12 +9,15 @@ import numpy as np
 from app.config import UISection
 from app.core.latest_value import LatestValue
 from app.types import FramePacket, VisionPacket
-from app.vision.calibration import CalibrationData, CalibrationManager
+from app.vision.calibration import (
+    CAL_MODE_HYBRID, CAL_MODE_LASER, CAL_MODE_XY, CAL_MODES,
+    CalibrationData, CalibrationManager, mode_entry_fields,
+)
 from app.vision.overlay import FIELD_ORDER, draw_calibration, draw_panel, draw_tracks
 
 
 class UIWorker:
-    """OpenCV UI loop. On Windows this should run in the main thread."""
+    """OpenCV UI loop. On Windows this must run in the main thread."""
 
     def __init__(
         self,
@@ -31,13 +34,28 @@ class UIWorker:
         self.stop_event = stop_event
 
         self.window_name = "VISION STABLE"
-        self.calib_mode: Optional[str] = None
+
+        # Generic field editing (numeric params)
         self.editing_key: Optional[str] = None
         self.edit_buffer = ""
 
+        # AIM pick mode
+        self.aim_mode = False
+
+        # Calibration point pick / entry state machine
+        self.point_pick_active = False   # waiting for user to click on video
+        self.pending_px: Optional[int] = None
+        self.pending_py: Optional[int] = None
+        self.point_entry_fields: list[tuple[str, str]] = []  # (field_key, label)
+        self.point_entry_cursor: int = 0
+        self.point_entry_buf: str = ""
+        self.point_entry_values: dict[str, float] = {}
+
+        # Panel hit-testing dicts (rebuilt each frame)
         self.buttons: dict[str, tuple[int, int, int, int]] = {}
         self.fields: dict[str, tuple[int, int, int, int]] = {}
 
+        # Video geometry (updated each frame)
         self.scale = 1.0
         self.off_x = 0
         self.off_y = 0
@@ -48,9 +66,10 @@ class UIWorker:
 
         self.fullscreen = False
 
-        # B-18: pre-allocated waiting canvas; rebuilt only on window resize
         self._waiting_canvas: Optional[np.ndarray] = None
         self._waiting_canvas_size: tuple[int, int] = (0, 0)
+
+    # ── main loop ─────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -70,11 +89,9 @@ class UIWorker:
                     break
                 continue
 
-            # B-17: single calibration snapshot per frame, passed to both draw calls
             cal = self.calibration.snapshot()
             result, _ = self.results.get()
 
-            # P-06: draw_tracks and draw_calibration happen inside _compose on resized frame
             canvas = self._compose(frame_packet.image, result, cal)
             cv2.imshow(self.window_name, canvas)
 
@@ -84,56 +101,41 @@ class UIWorker:
         self.stop_event.set()
         cv2.destroyAllWindows()
 
+    # ── rendering ─────────────────────────────────────────────────────────────
+
     def _show_waiting(self) -> None:
-        # B-18: reuse pre-allocated canvas; only reallocate when window is resized
-        window_w, window_h = self._current_window_size()
-        if (window_w, window_h) != self._waiting_canvas_size:
-            canvas = np.zeros((window_h, window_w, 3), dtype=np.uint8)
+        ww, wh = self._current_window_size()
+        if (ww, wh) != self._waiting_canvas_size:
+            canvas = np.zeros((wh, ww, 3), dtype=np.uint8)
             lines = [
-                "Waiting for RTSP frame...",
-                "ESC - exit",
-                "A - set aim point",
-                "F - set 4 floor points",
-                "Click field -> type number -> Enter",
+                "Ожидание RTSP потока...",
+                "ESC — выход",
+                "A — установить AIM",
+                "F — добавить точку калибровки",
+                "S — сохранить",
             ]
             y = 54
             for line in lines:
-                cv2.putText(canvas, line, (36, y), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (235, 235, 235), 1, cv2.LINE_AA)
-                y += 34
+                cv2.putText(canvas, line, (36, y), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (235, 235, 235), 1, cv2.LINE_AA)
+                y += 32
             self._waiting_canvas = canvas
-            self._waiting_canvas_size = (window_w, window_h)
-
+            self._waiting_canvas_size = (ww, wh)
         cv2.imshow(self.window_name, self._waiting_canvas)
 
-    def _current_window_size(self) -> tuple[int, int]:
-        try:
-            _x, _y, w, h = cv2.getWindowImageRect(self.window_name)
-            if w > 100 and h > 100:
-                return int(w), int(h)
-        except Exception:
-            pass
-
-        return int(self.ui_cfg.window_width), int(self.ui_cfg.window_height)
-
     def _compose(self, frame: np.ndarray, packet: Optional[VisionPacket], cal: CalibrationData) -> np.ndarray:
-        # B-17: accepts cal snapshot from run() — no second snapshot() call here
-        window_w, window_h = self._current_window_size()
-
-        panel_w = int(max(320, min(430, window_w * 0.25)))
-        video_w = max(1, window_w - panel_w)
-        video_h = window_h
-
+        ww, wh = self._current_window_size()
+        panel_w = int(max(340, min(460, ww * 0.27)))
+        video_w = max(1, ww - panel_w)
         fh, fw = frame.shape[:2]
-        canvas = np.zeros((window_h, window_w, 3), dtype=np.uint8)
+        canvas = np.zeros((wh, ww, 3), dtype=np.uint8)
 
-        self.scale = min(video_w / fw, video_h / fh)
+        self.scale = min(video_w / fw, wh / fh)
         self.draw_w = max(1, int(fw * self.scale))
         self.draw_h = max(1, int(fh * self.scale))
         self.off_x = int((video_w - self.draw_w) / 2)
-        self.off_y = int((video_h - self.draw_h) / 2)
+        self.off_y = int((wh - self.draw_h) / 2)
         self.src_w, self.src_h = fw, fh
 
-        # P-06: resize FIRST, draw overlay on the smaller surface (avoids full-res copy)
         interp = cv2.INTER_AREA if self.scale < 1.0 else cv2.INTER_LINEAR
         resized = cv2.resize(frame, (self.draw_w, self.draw_h), interpolation=interp)
 
@@ -147,106 +149,62 @@ class UIWorker:
             )
 
         if self.ui_cfg.show_calibration:
-            draw_calibration(resized, cal, scale=self.scale)
+            draw_calibration(
+                resized, cal, scale=self.scale,
+                pending_px=self.pending_px,
+                pending_py=self.pending_py,
+            )
 
         canvas[self.off_y:self.off_y + self.draw_h, self.off_x:self.off_x + self.draw_w] = resized
-
         cv2.rectangle(
             canvas,
             (self.off_x, self.off_y),
             (self.off_x + self.draw_w - 1, self.off_y + self.draw_h - 1),
-            (70, 70, 75),
-            1,
-            cv2.LINE_AA,
+            (70, 70, 75), 1, cv2.LINE_AA,
         )
 
         self.buttons = {}
         self.fields = {}
 
-        values: dict[str, str] = {}
-        for key, _label in FIELD_ORDER:
+        # Build field values for numeric panel
+        field_values: dict[str, str] = {}
+        for key, _ in FIELD_ORDER:
             if self.editing_key == key:
-                values[key] = self.edit_buffer
+                field_values[key] = self.edit_buffer
             else:
                 value = getattr(cal, key, "")
-                if isinstance(value, float):
-                    values[key] = f"{value:g}"
-                else:
-                    values[key] = str(value)
+                field_values[key] = f"{value:g}" if isinstance(value, float) else str(value)
+
+        # Hybrid distance validation
+        hybrid_errors = self.calibration.validate_hybrid_distances() if cal.cal_mode == CAL_MODE_HYBRID else []
+
+        ui_state = {
+            "cal_mode": cal.cal_mode,
+            "point_pick_active": self.point_pick_active,
+            "pending_px": self.pending_px,
+            "pending_py": self.pending_py,
+            "point_entry_fields": self.point_entry_fields,
+            "point_entry_cursor": self.point_entry_cursor,
+            "point_entry_buf": self.point_entry_buf,
+            "point_entry_values": {k: str(v) for k, v in self.point_entry_values.items()},
+            "cal_points": cal.cal_points or [],
+            "hybrid_errors": hybrid_errors,
+        }
 
         draw_panel(
             canvas,
             video_w,
             packet,
-            self.calib_mode,
+            ui_state,
             self.buttons,
             self.fields,
-            values,
+            field_values,
             self.editing_key,
         )
 
         return canvas
 
-    def _screen_to_frame(self, x: int, y: int) -> Optional[tuple[int, int]]:
-        if (
-            x < self.off_x
-            or x > self.off_x + self.draw_w
-            or y < self.off_y
-            or y > self.off_y + self.draw_h
-            or self.scale <= 0
-        ):
-            return None
-
-        fx = int((x - self.off_x) / self.scale)
-        fy = int((y - self.off_y) / self.scale)
-
-        return max(0, min(self.src_w - 1, fx)), max(0, min(self.src_h - 1, fy))
-
-    def _mouse_cb(self, event, x, y, flags, param) -> None:  # noqa: ANN001
-        if event != cv2.EVENT_LBUTTONDOWN:
-            return
-
-        for name, rect in self.buttons.items():
-            x1, y1, x2, y2 = rect
-            if x1 <= x <= x2 and y1 <= y <= y2:
-                if name == "aim":
-                    self.calib_mode = "aim"
-                    print("Click AIM point")
-                elif name == "floor4":
-                    self.calib_mode = "floor4"
-                    self.calibration.clear_floor_points()
-                    print("Click 4 floor points clockwise")
-                elif name == "save":
-                    self.calibration.save()
-                    print("Calibration saved")
-                return
-
-        for key, rect in self.fields.items():
-            x1, y1, x2, y2 = rect
-            if x1 <= x <= x2 and y1 <= y <= y2:
-                cal = self.calibration.snapshot()
-                self.editing_key = key
-                self.edit_buffer = str(getattr(cal, key, ""))
-                print(f"Editing {key}. Type value and press Enter.")
-                return
-
-        p = self._screen_to_frame(x, y)
-        if p is None:
-            return
-
-        fx, fy = p
-
-        if self.calib_mode == "aim":
-            self.calibration.set_aim(fx, fy)
-            self.calib_mode = None
-            print(f"AIM saved: {fx}, {fy}")
-
-        elif self.calib_mode == "floor4":
-            n = self.calibration.add_floor_point(fx, fy)
-            print(f"Floor point {n}: {fx}, {fy}")
-            if n >= 4:
-                self.calib_mode = None
-                print("Floor calibration saved")
+    # ── keyboard ──────────────────────────────────────────────────────────────
 
     def _handle_key(self, key: int) -> bool:
         if key == -1:
@@ -254,6 +212,21 @@ class UIWorker:
 
         low = key & 0xFF
 
+        # Point entry mode: collect values field by field
+        if self.pending_px is not None:
+            if low in (13, 10):   # Enter — commit current field
+                self._point_entry_advance()
+            elif low == 27:       # Esc — cancel
+                self._point_entry_cancel()
+            elif low in (8, 127): # Backspace
+                self.point_entry_buf = self.point_entry_buf[:-1]
+            elif 0 <= low <= 255:
+                ch = chr(low)
+                if ch in "0123456789.-":
+                    self.point_entry_buf += ch
+            return False
+
+        # Numeric field editing mode
         if self.editing_key:
             if low in (13, 10):
                 self._commit_edit()
@@ -268,28 +241,24 @@ class UIWorker:
                     self.edit_buffer += ch
             return False
 
+        # Normal commands
         if low == 27:
             return True
-
         if low in (ord("a"), ord("A")):
-            self.calib_mode = "aim"
-            print("Click AIM point")
+            self.aim_mode = True
+            self.point_pick_active = False
+            print("Кликните точку AIM на полу")
         elif low in (ord("f"), ord("F")):
-            self.calib_mode = "floor4"
-            self.calibration.clear_floor_points()
-            print("Click 4 floor points clockwise")
+            self._start_point_pick()
         elif low in (ord("s"), ord("S")):
             self.calibration.save()
-            print("Calibration saved")
+            print("Калибровка сохранена")
         elif low in (ord("p"), ord("P")):
             self.ui_cfg.show_pose = not self.ui_cfg.show_pose
-            print(f"show_pose={self.ui_cfg.show_pose}")
         elif low in (ord("t"), ord("T")):
             self.ui_cfg.show_tracks = not self.ui_cfg.show_tracks
-            print(f"show_tracks={self.ui_cfg.show_tracks}")
         elif low in (ord("c"), ord("C")):
             self.ui_cfg.show_calibration = not self.ui_cfg.show_calibration
-            print(f"show_calibration={self.ui_cfg.show_calibration}")
         elif low in (ord("m"), ord("M")):
             self.fullscreen = not self.fullscreen
             prop = cv2.WINDOW_FULLSCREEN if self.fullscreen else cv2.WINDOW_NORMAL
@@ -297,18 +266,171 @@ class UIWorker:
 
         return False
 
+    # ── mouse ─────────────────────────────────────────────────────────────────
+
+    def _mouse_cb(self, event, x, y, flags, param) -> None:  # noqa: ANN001
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        # Panel buttons
+        for name, rect in self.buttons.items():
+            x1, y1, x2, y2 = rect
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                self._handle_button(name)
+                return
+
+        # Panel numeric fields
+        for key, rect in self.fields.items():
+            x1, y1, x2, y2 = rect
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                if key.startswith("pe_"):
+                    return  # point entry fields are keyboard-only
+                cal = self.calibration.snapshot()
+                self.editing_key = key
+                self.edit_buffer = f"{getattr(cal, key, 0.0):g}"
+                return
+
+        # Video area clicks
+        p = self._screen_to_frame(x, y)
+        if p is None:
+            return
+        fx, fy = p
+
+        if self.aim_mode:
+            self.calibration.set_aim(fx, fy)
+            self.aim_mode = False
+            print(f"AIM установлен: ({fx}, {fy})")
+
+        elif self.point_pick_active:
+            self.pending_px = fx
+            self.pending_py = fy
+            self.point_pick_active = False
+            cal = self.calibration.snapshot()
+            self.point_entry_fields = mode_entry_fields(cal.cal_mode)
+            self.point_entry_cursor = 0
+            self.point_entry_buf = ""
+            self.point_entry_values = {}
+            n = len(cal.cal_points or []) + 1
+            print(f"Точка P{n} выбрана: пиксель ({fx}, {fy}). Введите значения.")
+
+    def _handle_button(self, name: str) -> None:
+        if name == "aim":
+            self.aim_mode = True
+            self.point_pick_active = False
+            print("Кликните точку AIM на полу")
+
+        elif name == "add_point":
+            self._start_point_pick()
+
+        elif name == "remove_point":
+            self.calibration.remove_last_cal_point()
+            print("Последняя точка удалена")
+
+        elif name == "clear_points":
+            self.calibration.clear_cal_points()
+            self._point_entry_cancel()
+            print("Все точки очищены")
+
+        elif name == "save":
+            self.calibration.save()
+            print("Калибровка сохранена")
+
+        elif name == "mode_xy":
+            self.calibration.set_cal_mode(CAL_MODE_XY)
+            self._point_entry_cancel()
+            print("Режим: XY-координаты")
+
+        elif name == "mode_laser":
+            self.calibration.set_cal_mode(CAL_MODE_LASER)
+            self._point_entry_cancel()
+            print("Режим: Лазер + угол")
+
+        elif name == "mode_hybrid":
+            self.calibration.set_cal_mode(CAL_MODE_HYBRID)
+            self._point_entry_cancel()
+            print("Режим: Гибрид")
+
+    # ── point entry helpers ────────────────────────────────────────────────────
+
+    def _start_point_pick(self) -> None:
+        self.point_pick_active = True
+        self.aim_mode = False
+        self.editing_key = None
+        self._point_entry_cancel()
+        print("Кликните на полу в видео чтобы разместить точку")
+
+    def _point_entry_advance(self) -> None:
+        """Commit current field value and advance to next, or finalise the point."""
+        if not self.point_entry_fields or self.pending_px is None:
+            return
+
+        fkey, _ = self.point_entry_fields[self.point_entry_cursor]
+        try:
+            self.point_entry_values[fkey] = float(self.point_entry_buf.replace(",", ".") or "0")
+        except ValueError:
+            self.point_entry_values[fkey] = 0.0
+
+        self.point_entry_cursor += 1
+        self.point_entry_buf = ""
+
+        if self.point_entry_cursor >= len(self.point_entry_fields):
+            # All fields collected — add the point
+            vals = self.point_entry_values
+            n = self.calibration.add_cal_point(
+                px=self.pending_px,
+                py=self.pending_py,
+                x_m=vals.get("x_m", 0.0),
+                y_m=vals.get("y_m", 0.0),
+                dist_m=vals.get("dist_m", 0.0),
+                angle_deg=vals.get("angle_deg", 0.0),
+            )
+            print(f"Точка P{n} добавлена: px=({self.pending_px},{self.pending_py}) {vals}")
+            self.pending_px = None
+            self.pending_py = None
+            self.point_entry_fields = []
+            self.point_entry_cursor = 0
+            self.point_entry_values = {}
+
+    def _point_entry_cancel(self) -> None:
+        self.pending_px = None
+        self.pending_py = None
+        self.point_pick_active = False
+        self.point_entry_fields = []
+        self.point_entry_cursor = 0
+        self.point_entry_buf = ""
+        self.point_entry_values = {}
+
+    # ── utilities ─────────────────────────────────────────────────────────────
+
+    def _screen_to_frame(self, x: int, y: int) -> Optional[tuple[int, int]]:
+        if (
+            x < self.off_x or x > self.off_x + self.draw_w
+            or y < self.off_y or y > self.off_y + self.draw_h
+            or self.scale <= 0
+        ):
+            return None
+        fx = int((x - self.off_x) / self.scale)
+        fy = int((y - self.off_y) / self.scale)
+        return max(0, min(self.src_w - 1, fx)), max(0, min(self.src_h - 1, fy))
+
+    def _current_window_size(self) -> tuple[int, int]:
+        try:
+            _x, _y, ww, wh = cv2.getWindowImageRect(self.window_name)
+            if ww > 100 and wh > 100:
+                return int(ww), int(wh)
+        except Exception:
+            pass
+        return int(self.ui_cfg.window_width), int(self.ui_cfg.window_height)
+
     def _commit_edit(self) -> None:
         try:
             if not self.editing_key:
                 return
-
             value = float(self.edit_buffer.replace(",", "."))
             self.calibration.set_value(self.editing_key, value)
-            print(f"Saved {self.editing_key} = {value}")
-
+            print(f"Сохранено {self.editing_key} = {value}")
         except Exception as exc:
-            print(f"Bad value for {self.editing_key}: {exc}")
-
+            print(f"Неверное значение для {self.editing_key}: {exc}")
         finally:
             self.editing_key = None
             self.edit_buffer = ""

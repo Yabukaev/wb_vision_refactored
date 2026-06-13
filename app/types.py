@@ -35,9 +35,10 @@ class Detection:
 class GeoPoint:
     x_m: float
     y_m: float
-    distance_m: float
+    distance_m: float           # floor distance from AIM
     inside_room: bool
     inside_calibration_zone: bool
+    distance_cam_m: float = 0.0  # 3D distance from camera lens
 
 
 @dataclass(slots=True)
