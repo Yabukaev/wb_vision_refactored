@@ -1,6 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
+import logging
 import queue
 import threading
 from typing import Any, Optional
@@ -9,6 +10,8 @@ import paho.mqtt.client as mqtt
 
 from app.config import MqttSection
 from app.types import MqttMessage
+
+log = logging.getLogger("mqtt")
 
 
 class MqttWorker(threading.Thread):
@@ -43,8 +46,11 @@ class MqttWorker(threading.Thread):
     def run(self) -> None:
         if not self.enabled:
             return
-        self._connect()
         while not self.stop_event.is_set():
+            if self._client is None:
+                if not self._connect():
+                    self.stop_event.wait(float(self.cfg.reconnect_delay_sec))
+                    continue
             try:
                 msg = self.queue.get(timeout=0.25)
             except queue.Empty:
@@ -52,19 +58,36 @@ class MqttWorker(threading.Thread):
             self._publish(msg)
         self._disconnect()
 
-    def _connect(self) -> None:
+    def _connect(self) -> bool:
         try:
-            self._client = mqtt.Client(client_id=self.cfg.client_id)
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.cfg.client_id)
+            client.on_connect = self._on_connect
+            client.on_disconnect = self._on_disconnect
             if self.cfg.username:
-                self._client.username_pw_set(self.cfg.username, self.cfg.password or None)
-            self._client.connect(self.cfg.host, int(self.cfg.port), 5)
-            self._client.loop_start()
-            self.connected = True
+                client.username_pw_set(self.cfg.username, self.cfg.password or None)
+            client.connect(self.cfg.host, int(self.cfg.port), 5)
+            client.loop_start()
+            self._client = client
+            self.last_error = ""
+            return True
         except Exception as exc:
-            self.enabled = False
+            # Keep the worker enabled: it retries until the broker is reachable.
             self.connected = False
+            if str(exc) != self.last_error:
+                log.warning("MQTT connect to %s:%s failed: %s", self.cfg.host, self.cfg.port, exc)
             self.last_error = str(exc)
-            print(f"MQTT disabled: {exc}")
+            return False
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:  # noqa: ANN001
+        self.connected = not reason_code.is_failure
+        if self.connected:
+            log.info("MQTT connected to %s:%s", self.cfg.host, self.cfg.port)
+        else:
+            log.warning("MQTT connection refused: %s", reason_code)
+
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties) -> None:  # noqa: ANN001
+        self.connected = False
+        log.warning("MQTT disconnected: %s", reason_code)
 
     def _publish(self, msg: MqttMessage) -> None:
         if not self.enabled or self._client is None:
@@ -86,4 +109,3 @@ class MqttWorker(threading.Thread):
             self._client.disconnect()
         except Exception:
             pass
-
