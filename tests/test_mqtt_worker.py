@@ -42,3 +42,14 @@ def test_enqueue_noop_when_disabled():
     worker.enabled = False
     worker.enqueue("t", 1)
     assert worker.queue.qsize() == 0
+
+
+def test_drain_publishes_remaining_queue_items():
+    """B-01: _drain should publish all queued messages including retain=True offline status."""
+    worker = _worker()
+    # Simulate items queued but worker loop already stopped (no client → publish is no-op)
+    for i in range(3):
+        worker.enqueue("topic", f"value_{i}")
+    assert worker.queue.qsize() == 3
+    worker._drain()
+    assert worker.queue.qsize() == 0  # all items consumed (even if not actually sent)

@@ -76,3 +76,35 @@ def test_alive_track_is_not_marked_gone():
     worker._publish(now=2.0, packet=_packet([7]))
 
     assert ("cam1/person/7/state", "gone") not in fake.messages
+
+
+def test_publish_track_uses_passed_timestamp():
+    """B-04: ts in JSON payload must match the `now` argument, not a fresh time.time()."""
+    import json
+    fake = FakeMqtt()
+    worker = _worker(fake)
+
+    worker._publish(now=12345.0, packet=_packet([3]))
+
+    json_msgs = [v for t, v in fake.messages if t == "cam1/person/3/json"]
+    assert json_msgs, "expected a /json message"
+    payload = json.loads(json_msgs[0])
+    assert payload["ts"] == 12345.0
+
+
+def test_simplified_topics_per_track():
+    """P-03: each track should publish at most json + state + 3 geo fields = 5 messages."""
+    fake = FakeMqtt()
+    worker = _worker(fake)
+
+    worker._publish(now=1.0, packet=_packet([1]))
+
+    track_msgs = [t for t, _ in fake.messages if "/person/1/" in t and "health" not in t]
+    # json + state only (no geo since TrackSnapshot.geo is None)
+    assert len(track_msgs) <= 5
+    assert any("/json" in t for t in track_msgs)
+    assert any("/state" in t for t in track_msgs)
+    # Removed: foot_x, foot_y, confidence are no longer separate topics
+    assert not any("/foot_x" in t for t in track_msgs)
+    assert not any("/foot_y" in t for t in track_msgs)
+    assert not any("/confidence" in t for t in track_msgs)

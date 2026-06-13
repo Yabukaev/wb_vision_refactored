@@ -53,5 +53,22 @@ def test_one_detection_updates_only_one_track():
     tracker = _tracker()
     tracker.update([_det(0, 0, 60, 200), _det(70, 0, 130, 200)], now=1.0)
     tracks = tracker.update([_det(30, 0, 90, 200)], now=1.2)
-    # one detection may update only one of the two close tracks
     assert sum(tr.hits for tr in tracks) == 3
+
+
+def test_snapshot_foot_is_integer_tuple():
+    """B-16: internal float smoothing must still export integer coordinates."""
+    tracker = _tracker(smoothing=0.65)
+    tracker.update([_det(100, 100, 160, 300)], now=1.0)
+    tracks = tracker.update([_det(104, 102, 164, 302)], now=1.2)
+    fx, fy = tracks[0].foot
+    assert isinstance(fx, int)
+    assert isinstance(fy, int)
+
+
+def test_snapshot_box_is_integer_tuple():
+    """B-16: internal float smoothing must still export integer box."""
+    tracker = _tracker(smoothing=0.65)
+    tracks = tracker.update([_det(100, 100, 160, 300)], now=1.0)
+    for v in tracks[0].box:
+        assert isinstance(v, int)
