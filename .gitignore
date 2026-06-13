@@ -16,3 +16,4 @@ backups/
 # Logs and runtime artifacts
 logs/
 .service.pid
+data/runtime.json

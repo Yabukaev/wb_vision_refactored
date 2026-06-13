@@ -92,19 +92,27 @@ def test_publish_track_uses_passed_timestamp():
     assert payload["ts"] == 12345.0
 
 
-def test_simplified_topics_per_track():
-    """P-03: each track should publish at most json + state + 3 geo fields = 5 messages."""
+def test_track_schema_topics():
+    """Each track publishes the stable schema: json + pose/state/motion/activity/zone."""
     fake = FakeMqtt()
     worker = _worker(fake)
 
     worker._publish(now=1.0, packet=_packet([1]))
 
-    track_msgs = [t for t, _ in fake.messages if "/person/1/" in t and "health" not in t]
-    # json + state only (no geo since TrackSnapshot.geo is None)
-    assert len(track_msgs) <= 5
-    assert any("/json" in t for t in track_msgs)
-    assert any("/state" in t for t in track_msgs)
-    # Removed: foot_x, foot_y, confidence are no longer separate topics
-    assert not any("/foot_x" in t for t in track_msgs)
-    assert not any("/foot_y" in t for t in track_msgs)
-    assert not any("/confidence" in t for t in track_msgs)
+    track_topics = [t for t, _ in fake.messages if "/person/1/" in t and "health" not in t]
+    for suffix in ("/json", "/pose", "/motion", "/activity", "/zone"):
+        assert any(t.endswith(suffix) for t in track_topics), f"missing {suffix}"
+    # Removed: foot_x, foot_y, confidence are not separate topics
+    assert not any("/foot_x" in t for t in track_topics)
+    assert not any("/confidence" in t for t in track_topics)
+
+
+def test_track_json_has_classification_fields():
+    import json
+    fake = FakeMqtt()
+    worker = _worker(fake)
+    worker._publish(now=1.0, packet=_packet([5]))
+    payload = json.loads(next(v for t, v in fake.messages if t == "cam1/person/5/json"))
+    for key in ("id", "pose", "motion", "activity", "zone"):
+        assert key in payload, f"missing {key}"
+    assert payload["pose"] == "standing"

@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from pathlib import Path
 
-from app.config import TrackerSection, VisionSection, WebSection
+from app.config import ActivitySection, TrackerSection, VisionSection, WebSection
 from app.core.latest_value import LatestValue
 from app.model_registry import discover_models, with_current
 from app.runtime_tuning import apply_tuning, get_tuning, tuning_specs
@@ -29,6 +29,8 @@ def build_app(
     vision_cfg: Optional[VisionSection] = None,
     tracker_cfg: Optional[TrackerSection] = None,
     inference: Optional[object] = None,
+    activity_cfg: Optional[ActivitySection] = None,
+    store: Optional[object] = None,
 ) -> FastAPI:
     app = FastAPI(title="WB Vision")
     vision_cfg = vision_cfg if vision_cfg is not None else VisionSection()
@@ -85,16 +87,19 @@ def build_app(
                 "ram": round(packet.ram_percent, 0) if packet else 0.0,
             },
             "tracks": tracks,
-            "tuning": get_tuning(vision_cfg, tracker_cfg),
+            "tuning": get_tuning(vision_cfg, tracker_cfg, activity_cfg),
             "tuning_specs": tuning_specs(),
         })
 
     @app.post("/api/tuning")
     def set_tuning(body: dict) -> JSONResponse:
+        key = str(body["key"])
         try:
-            new_val = apply_tuning(vision_cfg, tracker_cfg, str(body["key"]), body["value"])
+            new_val = apply_tuning(vision_cfg, tracker_cfg, key, body["value"], activity=activity_cfg)
         except KeyError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        if store is not None:
+            store.set_tuning(key, new_val)
         return JSONResponse({"ok": True, "value": new_val})
 
     # ── model hot-swap ───────────────────────────────────────────────────────
@@ -118,6 +123,8 @@ def build_app(
             inference.request_pose_model(path)
         else:
             inference.request_object_model(path)
+        if store is not None:
+            store.set_model(kind, path)
         return JSONResponse({"ok": True})
 
     # ── calibration mutations ────────────────────────────────────────────────
@@ -231,6 +238,8 @@ class WebServer(threading.Thread):
         vision_cfg: Optional[VisionSection] = None,
         tracker_cfg: Optional[TrackerSection] = None,
         inference: Optional[object] = None,
+        activity_cfg: Optional[ActivitySection] = None,
+        store: Optional[object] = None,
     ) -> None:
         super().__init__(name="web-server", daemon=True)
         self.cfg = web_cfg
@@ -241,6 +250,8 @@ class WebServer(threading.Thread):
         self.vision_cfg = vision_cfg
         self.tracker_cfg = tracker_cfg
         self.inference = inference
+        self.activity_cfg = activity_cfg
+        self.store = store
         self._server: Optional[object] = None
 
     def run(self) -> None:
@@ -253,6 +264,7 @@ class WebServer(threading.Thread):
             app = build_app(
                 self.frames, self.results, self.calibration, self.cfg,
                 self.vision_cfg, self.tracker_cfg, self.inference,
+                self.activity_cfg, self.store,
             )
             config = uvicorn.Config(
                 app, host=self.cfg.host, port=int(self.cfg.port),

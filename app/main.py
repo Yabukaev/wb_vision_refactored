@@ -101,6 +101,22 @@ def main() -> int:
         activity_cfg=settings.activity,
     )
 
+    # Apply persisted runtime overrides (live tuning + selected models) saved
+    # from the web UI, before the workers load models.
+    from app.runtime_store import RuntimeStore
+    from app.runtime_tuning import apply_tuning
+    store = RuntimeStore(config.resolve_path("data/runtime.json"))
+    _saved_models = store.models()
+    if _saved_models.get("pose"):
+        settings.vision.model_path = _saved_models["pose"]
+    if _saved_models.get("object"):
+        settings.activity.det_model_path = _saved_models["object"]
+    for _k, _v in store.tuning().items():
+        try:
+            apply_tuning(settings.vision, settings.tracker, _k, _v, activity=settings.activity)
+        except (KeyError, ValueError, TypeError):
+            log.warning("ignoring saved tuning %s=%r", _k, _v)
+
     log.info("START")
     log.info("CONFIG: %s", Path(args.config).resolve())
     log.info("CAMERA: %s", settings.camera.id)
@@ -113,7 +129,7 @@ def main() -> int:
         web_server = WebServer(
             settings.web, frames, results, calibration, stop_event,
             vision_cfg=settings.vision, tracker_cfg=settings.tracker,
-            inference=inference_worker,
+            inference=inference_worker, activity_cfg=settings.activity, store=store,
         )
         log.info("WEB: http://%s:%s", settings.web.host, settings.web.port)
 

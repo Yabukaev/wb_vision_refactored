@@ -3,12 +3,27 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import TrackerSection, VisionSection
+from app.config import ActivitySection, TrackerSection, VisionSection
 from app.runtime_tuning import TUNABLES, apply_tuning, get_tuning, tuning_specs
 
 
 def _cfgs():
     return VisionSection(), TrackerSection()
+
+
+def test_apply_activity_det_fps():
+    v, t, a = VisionSection(), TrackerSection(), ActivitySection()
+    apply_tuning(v, t, "det_fps", 5.0, activity=a)
+    assert a.det_fps == 5.0
+
+
+def test_activity_keys_skipped_without_section():
+    v, t = _cfgs()
+    d = get_tuning(v, t, None)
+    assert "det_fps" not in d  # no activity cfg -> omitted
+    a = ActivitySection()
+    d2 = get_tuning(v, t, a)
+    assert "det_fps" in d2
 
 
 def test_apply_updates_vision_fps():

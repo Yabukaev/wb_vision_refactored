@@ -6,8 +6,11 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import ConfigManager, TrackerSection, VisionSection, WebSection
+from app.config import (
+    ActivitySection, ConfigManager, TrackerSection, VisionSection, WebSection,
+)
 from app.core.latest_value import LatestValue
+from app.runtime_store import RuntimeStore
 from app.vision.calibration import CalibrationManager
 from app.web.server import build_app
 
@@ -141,6 +144,23 @@ def test_set_model_rejects_bad_kind(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     c = _client_with_inference(tmp_path)
     assert c.post("/api/model", json={"kind": "bogus", "path": "x.pt"}).status_code == 400
+
+
+def test_tuning_and_model_persist_to_store(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cal_file = (tmp_path / "calibration.json").as_posix()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(CONFIG_YAML.format(cal_file=cal_file), encoding="utf-8")
+    calibration = CalibrationManager(ConfigManager(cfg))
+    store = RuntimeStore(tmp_path / "runtime.json")
+    stub = _InferenceStub()
+    app = build_app(LatestValue(), LatestValue(), calibration, WebSection(),
+                    VisionSection(), TrackerSection(), stub, ActivitySection(), store)
+    c = TestClient(app)
+    c.post("/api/tuning", json={"key": "det_fps", "value": 5})
+    c.post("/api/model", json={"kind": "pose", "path": "models/yolo11s-pose.pt"})
+    assert store.tuning()["det_fps"] == 5.0
+    assert store.models()["pose"] == "models/yolo11s-pose.pt"
 
 
 def test_zone_add_and_delete(client):

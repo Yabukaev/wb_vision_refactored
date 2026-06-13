@@ -75,10 +75,12 @@ class InferenceWorker(threading.Thread):
             self._pending_object_model = str(path)
 
     def current_models(self) -> dict:
-        obj = None
-        if self.activity_classifier is not None:
+        with self._model_lock:
+            pose = self._pending_pose_model or self.vision_cfg.model_path
+            obj = self._pending_object_model
+        if obj is None and self.activity_classifier is not None:
             obj = self.activity_classifier.object_model_path
-        return {"pose": self.vision_cfg.model_path, "object": obj}
+        return {"pose": pose, "object": obj}
 
     def _apply_pending_models(self) -> None:
         with self._model_lock:
@@ -197,10 +199,15 @@ class InferenceWorker(threading.Thread):
         # B-04: use the passed `now` timestamp instead of calling time.time() again
         cid = self.camera_cfg.id
         fx, fy = tr.foot
+        # Stable schema: id, coordinates, posture (sit/stand/lie), motion
+        # (walk/sleep/...), and classification activity (phone/book/eating/...).
+        zone = tr.geo.zone if tr.geo else ""
         payload: dict = {
             "id": tr.track_id,
-            "state": tr.state,
-            "motion": tr.motion,
+            "pose": tr.state,            # sitting / standing / lying
+            "motion": tr.motion,         # walking / sleeping / fallen / stationary
+            "activity": tr.activity,     # on phone / reading / eating / ... ("" if none)
+            "zone": zone,
             "confidence": round(tr.conf, 3),
             "foot_px": {"x": fx, "y": fy},
             "frame": {"width": fw, "height": fh},
@@ -208,28 +215,25 @@ class InferenceWorker(threading.Thread):
             "age_sec": round(tr.age_sec, 2),
             "ts": now,
         }
-        if tr.activity:
-            payload["activity"] = tr.activity
         if tr.geo:
-            payload["geo"] = {
-                "x_m": round(tr.geo.x_m, 3),
-                "y_m": round(tr.geo.y_m, 3),
-                "distance_floor_m": round(tr.geo.distance_m, 3),
-                "distance_cam_m": round(tr.geo.distance_cam_m, 3),
-                "inside_room": tr.geo.inside_room,
-                "inside_calibration_zone": tr.geo.inside_calibration_zone,
-            }
+            payload["x_m"] = round(tr.geo.x_m, 3)
+            payload["y_m"] = round(tr.geo.y_m, 3)
+            payload["distance_cam_m"] = round(tr.geo.distance_cam_m, 3)
+            payload["distance_floor_m"] = round(tr.geo.distance_m, 3)
+            payload["inside_room"] = tr.geo.inside_room
+            payload["inside_calibration_zone"] = tr.geo.inside_calibration_zone
 
         # P-07: serialize JSON once and reuse
         payload_json = json.dumps(payload, ensure_ascii=False)
         base = f"{cid}/person/{tr.track_id}"
         self._mqtt(f"{base}/json", payload_json)
-        self._mqtt(f"{base}/state", tr.state)
+        self._mqtt(f"{base}/pose", tr.state)
+        self._mqtt(f"{base}/state", tr.state)   # kept for backward compatibility
         self._mqtt(f"{base}/motion", tr.motion)
-        if tr.activity:
-            self._mqtt(f"{base}/activity", tr.activity)
+        self._mqtt(f"{base}/activity", tr.activity or "none")
+        self._mqtt(f"{base}/zone", zone or "none")
 
-        # P-03: expose only the most-used flat geo fields; everything else is in /json
+        # P-03: most-used flat geo fields; everything else is in /json
         if tr.geo:
             self._mqtt(f"{base}/x_m", round(tr.geo.x_m, 3))
             self._mqtt(f"{base}/y_m", round(tr.geo.y_m, 3))
