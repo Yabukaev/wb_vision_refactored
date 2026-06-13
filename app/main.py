@@ -107,9 +107,17 @@ def main() -> int:
     log.info("MODEL: %s", settings.vision.model_path)
     log.info("UI: %s", "on" if args.debug and settings.ui.enabled else "off")
 
+    web_server = None
+    if settings.web.enabled:
+        from app.web.server import WebServer
+        web_server = WebServer(settings.web, frames, results, calibration, stop_event)
+        log.info("WEB: http://%s:%s", settings.web.host, settings.web.port)
+
     mqtt_worker.start()
     rtsp_reader.start()
     inference_worker.start()
+    if web_server is not None:
+        web_server.start()
 
     try:
         if args.debug and settings.ui.enabled:
@@ -124,7 +132,10 @@ def main() -> int:
         stop_event.set()
         # B-03: workers own their LatestValue lifecycle (RtspReader closes frames,
         # InferenceWorker closes results). No redundant close() calls here.
-        for worker in (rtsp_reader, inference_worker, mqtt_worker):
+        workers = [rtsp_reader, inference_worker, mqtt_worker]
+        if web_server is not None:
+            workers.append(web_server)
+        for worker in workers:
             worker.join(timeout=3.0)
         log.info("STOP")
     return 0

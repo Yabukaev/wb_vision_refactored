@@ -170,6 +170,15 @@ class UISection:
 
 
 @dataclass(slots=True)
+class WebSection:
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8000
+    stream_max_width: int = 1280   # MJPEG downscale cap for bandwidth
+    stream_fps: float = 15.0
+
+
+@dataclass(slots=True)
 class Settings:
     root_dir: Path
     config_path: Path
@@ -181,6 +190,7 @@ class Settings:
     calibration: CalibrationSection = field(default_factory=CalibrationSection)
     activity: ActivitySection = field(default_factory=ActivitySection)
     ui: UISection = field(default_factory=UISection)
+    web: WebSection = field(default_factory=WebSection)
 
 
 def _section(cls: type, data: dict[str, Any]) -> Any:
@@ -225,6 +235,7 @@ class ConfigManager:
             calibration=_section(CalibrationSection, raw.get("calibration", {})),
             activity=_section(ActivitySection, raw.get("activity", {})),
             ui=_section(UISection, raw.get("ui", {})),
+            web=_section(WebSection, raw.get("web", {})),
         )
         if not str(settings.camera.rtsp_url).strip():
             raise ValueError(

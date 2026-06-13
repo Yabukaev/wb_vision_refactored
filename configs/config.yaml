@@ -76,3 +76,10 @@ ui:
   show_pose: true
   show_tracks: true
   show_calibration: true
+
+web:
+  enabled: true
+  host: 0.0.0.0
+  port: 8000
+  stream_max_width: 1280
+  stream_fps: 15.0
