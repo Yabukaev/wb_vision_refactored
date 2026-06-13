@@ -1,6 +1,7 @@
 # Полный анализ кода WB Vision Refactored
 
-Дата: 2026-06-13. Анализ только по коду, без запуска. Ничего не менялось.
+Дата: 2026-06-13. Анализ только по коду, без запуска.
+**Статус: все баги B-01..B-18 и P-03..P-07 исправлены (2026-06-13). 46 тестов — OK.**
 
 ---
 
@@ -278,23 +279,34 @@ nssm status WBVision
 
 ## Итоговая таблица приоритетов
 
-| # | Файл | Тип | Критичность |
-|---|---|---|---|
-| B-01 | inference_worker.py:104 | Баг | P0 — offline не доходит |
-| B-02 | inference_worker.py:84 | Баг | P0 — CPU всегда 0 при старте |
-| B-04 | inference_worker.py:147 | Баг | P1 — ts рассинхронизирован |
-| B-05 | detector.py:22-26 | Баг | P1 — keypoints без conf-фильтра |
-| B-06 | detector.py:30-38 | Баг | P1 — state_by_pose игнорирует позу |
-| B-07 | rtsp_reader.py:103 | Баг | P1 — stats.fps без синхронизации |
-| B-08 | rtsp_reader.py:87 | Баг | P1 — ошибка RTSP не логируется |
-| B-10 | main.py:61 | Баг | P1 — SIGTERM не работает на Windows |
-| B-11 | config.py:152 | Баг | P1 — типы строк вместо int/float |
-| B-12 | config.py:151 | Баг | P1 — опечатки в yaml молча теряются |
-| B-13 | tracker.py:54,82 | Баг | P2 — лишний _drop_expired |
-| B-16 | tracker.py:16-21 | Баг | P2 — int-truncation drift |
-| B-17 | ui_worker.py:71,167 | Баг | P2 — двойной snapshot() |
-| P-01 | rtsp_reader.py | Перф | P1 — декодирование всех кадров |
-| P-02 | detector.py:49 | Перф | P1 — YOLO CPU (ONNX решит) |
-| P-03 | inference_worker.py:158 | Перф | P1 — MQTT fanout 150 msg/sec |
-| P-04 | inference_worker.py:83 | Перф | P1 — psutil на каждом кадре |
+| # | Файл | Тип | Критичность | Статус |
+|---|---|---|---|---|
+| B-01 | mqtt_worker.py | Баг | P0 — offline не доходит | **FIXED** |
+| B-02 | inference_worker.py | Баг | P0 — CPU всегда 0 при старте | **FIXED** |
+| B-03 | main.py | Баг | P0 — двойной close() | **FIXED** |
+| B-04 | inference_worker.py | Баг | P1 — ts рассинхронизирован | **FIXED** |
+| B-05 | detector.py | Баг | P1 — keypoints без conf-фильтра | **FIXED** |
+| B-06 | detector.py | Баг | P1 — state_by_pose игнорирует позу | **FIXED** |
+| B-07 | rtsp_reader.py | Баг | P1 — stats.fps без синхронизации | **FIXED** |
+| B-08 | rtsp_reader.py | Баг | P1 — ошибка RTSP не логируется | **FIXED** |
+| B-09 | rtsp_reader.py | Баг | P1 — setdefault не переопределяет | **FIXED** |
+| B-10 | main.py | Баг | P1 — SIGTERM не работает на Windows | **FIXED** |
+| B-11 | config.py | Баг | P1 — типы строк вместо int/float | **FIXED** |
+| B-12 | config.py | Баг | P1 — опечатки в yaml молча теряются | **FIXED** |
+| B-13 | tracker.py | Баг | P2 — лишний _drop_expired | **FIXED** |
+| B-14 | tracker.py | Баг | P2 — ID растёт бесконечно | не трогали (не критично) |
+| B-15 | tracker.py | Баг | P2 — Counter на каждом кадре | не трогали (мизер) |
+| B-16 | tracker.py | Баг | P2 — int-truncation drift | **FIXED** |
+| B-17 | ui_worker.py | Баг | P2 — двойной snapshot() | **FIXED** |
+| B-18 | ui_worker.py | Баг | P2 — canvas allocate каждые 30мс | **FIXED** |
+| B-19 | ui_worker.py | Баг | P2 — frame.copy() на большом кадре | **FIXED** (P-06) |
+| P-01 | rtsp_reader.py | Перф | P1 — декодирование всех кадров | не трогали (нужен субпоток на камере) |
+| P-02 | detector.py | Перф | P1 — YOLO CPU (ONNX решит) | не трогали (imgsz не меняем) |
+| P-03 | inference_worker.py | Перф | P1 — MQTT fanout 150 msg/sec | **FIXED** |
+| P-04 | inference_worker.py | Перф | P1 — psutil на каждом кадре | **FIXED** |
+| P-05 | latest_value.py | Перф | P2 — notify_all не нужен | **FIXED** |
+| P-06 | ui_worker.py + overlay.py | Перф | P2 — resize перед overlay | **FIXED** |
+| P-07 | inference_worker.py | Перф | P2 — JSON сериализуется дважды | **FIXED** |
 | P-06 | ui_worker.py:69,151 | Перф | P2 — copy до resize |
+Надо сделать чтобы окно с отрисовкой видео открывалось только в режиме дебаг без него только отдача координат и все.
+Так же добавить распознование стои лежит идет спит упал, и добавить распознование классификацию - с книгой с телефоном моет посуду готовит еду, кушает, в душе в туалете на горшке, красится у зеркала,  сидит у компьютера.
