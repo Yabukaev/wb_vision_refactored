@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from functools import lru_cache
 from typing import Optional
 
 import cv2
@@ -7,9 +9,43 @@ import numpy as np
 
 from app.types import TrackSnapshot, VisionPacket
 from app.vision.calibration import (
-    CAL_MODE_HYBRID, CAL_MODE_LASER, CAL_MODE_XY,
+    CAL_MODE_HYBRID, CAL_MODE_LASER, CAL_MODE_XY, _point_to_xy,
     CalibrationData, mode_entry_fields, mode_label,
 )
+
+# ── PIL Unicode text renderer ─────────────────────────────────────────────────
+
+try:
+    from PIL import Image as _PILImage, ImageDraw as _PILDraw, ImageFont as _PILFont
+    _PIL_OK = True
+except ImportError:
+    _PIL_OK = False
+
+def _find_font_file() -> Optional[str]:
+    for p in [
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\tahoma.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]:
+        if os.path.exists(p):
+            return p
+    return None
+
+_FONT_FILE: Optional[str] = _find_font_file()
+
+
+@lru_cache(maxsize=20)
+def _get_pil_font(px_size: int):
+    if not _PIL_OK:
+        return None
+    if _FONT_FILE:
+        try:
+            return _PILFont.truetype(_FONT_FILE, px_size)
+        except Exception:
+            pass
+    return _PILFont.load_default()
 
 POSE_EDGES = [
     (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
@@ -57,7 +93,56 @@ def _text(
     color: tuple[int, int, int] = (235, 235, 235),
     thickness: int = 1,
 ) -> None:
-    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+    # Fast path: pure ASCII — OpenCV handles it natively
+    if text.isascii():
+        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+        return
+
+    # Unicode/Cyrillic: render via PIL on a small crop of the image
+    if not _PIL_OK:
+        # Fallback: strip to ASCII and draw what we can
+        cv2.putText(img, text.encode("ascii", "replace").decode(), org,
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+        return
+
+    px_size = max(9, int(scale * 26))
+    font = _get_pil_font(px_size)
+    if font is None:
+        return
+
+    x, y = org  # OpenCV: (x, baseline_y)
+
+    # Measure text to compute crop bounds
+    tmp = _PILImage.new("RGB", (1, 1))
+    tmp_draw = _PILDraw.Draw(tmp)
+    try:
+        bbox = tmp_draw.textbbox((0, 0), text, font=font)  # (l, t, r, b) relative to anchor
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        # bbox[1] is negative for FreeTypeFont (ascent above baseline)
+        draw_x = x - bbox[0]
+        draw_y = y + bbox[1]  # moves text up so baseline aligns with org y
+    except AttributeError:
+        # Older Pillow: use getsize
+        tw, th = font.getsize(text)  # type: ignore[attr-defined]
+        draw_x, draw_y = x, y - th
+        bbox = (0, -th, tw, 0)
+
+    # Crop region (add margin for descenders / rounding)
+    x0 = max(0, x - 2)
+    y0 = max(0, draw_y - 2)
+    x1 = min(img.shape[1], x0 + tw + 8)
+    y1 = min(img.shape[0], draw_y + th + 6)
+
+    if x1 <= x0 or y1 <= y0:
+        return
+
+    crop = img[y0:y1, x0:x1].copy()
+    pil_crop = _PILImage.fromarray(crop[..., ::-1])   # BGR → RGB
+    draw = _PILDraw.Draw(pil_crop)
+    fill_rgb = (color[2], color[1], color[0])          # BGR → RGB
+    draw.text((draw_x - x0, draw_y - y0), text, font=font, fill=fill_rgb)
+    img[y0:y1, x0:x1] = np.array(pil_crop)[..., ::-1]  # RGB → BGR
 
 
 def draw_pose(frame: np.ndarray, keypoints: Optional[np.ndarray], scale: float = 1.0) -> None:
@@ -110,7 +195,6 @@ def draw_calibration(
             cv2.line(frame, (ax, ay), sp, (80, 80, 200), 1, cv2.LINE_AA)
 
         # Point markers + labels
-        from app.vision.calibration import _point_to_xy
         for i, (sp, pt) in enumerate(zip(scaled, pts_cal)):
             cv2.circle(frame, sp, 7, col, -1, cv2.LINE_AA)
             cv2.circle(frame, sp, 9, (255, 255, 255), 1, cv2.LINE_AA)
@@ -327,7 +411,6 @@ def draw_panel(
     # ── Cal points list ───────────────────────────────────────────────────────
     if cal_points:
         section(f"Точки ({len(cal_points)})")
-        from app.vision.calibration import _point_to_xy
         for i, pt in enumerate(cal_points[-6:]):  # show last 6
             idx = len(cal_points) - min(6, len(cal_points)) + i
             wx, wy = _point_to_xy(pt, cal_mode)
