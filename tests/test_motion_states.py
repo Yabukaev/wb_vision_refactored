@@ -129,13 +129,13 @@ def _snap(cx: int = 230, fy: int = 300) -> TrackSnapshot:
 def test_activity_rules_phone():
     rules = ActivityRules()
     objects = [{"label": "cell phone", "cx": 235.0, "cy": 195.0, "conf": 0.85}]
-    assert rules.classify(_snap(), objects) == "с телефоном"
+    assert rules.classify(_snap(), objects) == "on phone"
 
 
 def test_activity_rules_laptop():
     rules = ActivityRules()
     objects = [{"label": "laptop", "cx": 230.0, "cy": 198.0, "conf": 0.80}]
-    assert rules.classify(_snap(), objects) == "у компьютера"
+    assert rules.classify(_snap(), objects) == "at computer"
 
 
 def test_activity_rules_no_nearby_objects():
@@ -151,7 +151,7 @@ def test_activity_rules_priority_toilet_over_phone():
         {"label": "toilet", "cx": 232.0, "cy": 195.0, "conf": 0.80},
         {"label": "cell phone", "cx": 228.0, "cy": 200.0, "conf": 0.85},
     ]
-    assert rules.classify(_snap(), objects) == "в туалете"
+    assert rules.classify(_snap(), objects) == "in bathroom"
 
 
 def test_activity_rules_empty_objects():

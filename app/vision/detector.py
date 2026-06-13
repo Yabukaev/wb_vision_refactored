@@ -132,14 +132,26 @@ def box_iou(a: tuple, b: tuple) -> float:
     return inter / max(1, aa + bb - inter)
 
 
+def _box_area(box: tuple) -> float:
+    x1, y1, x2, y2 = box
+    return max(0.0, float(x2 - x1)) * max(0.0, float(y2 - y1))
+
+
 def suppress_duplicates(dets: list[Detection], foot_dist_px: float, iou_threshold: float) -> list[Detection]:
     kept: list[Detection] = []
     for det in sorted(dets, key=lambda d: d.conf, reverse=True):
         duplicate = False
+        det_area = _box_area(det.box)
         for old in kept:
             foot_close = math.hypot(det.foot[0] - old.foot[0], det.foot[1] - old.foot[1]) < foot_dist_px
             overlap = box_iou(det.box, old.box) > iou_threshold
             if foot_close or overlap:
+                # Guard: if boxes differ in area by >3x, they are different people
+                # (one crouching, one standing, or partial vs full view).
+                old_area = _box_area(old.box)
+                size_ratio = max(det_area, old_area) / max(min(det_area, old_area), 1.0)
+                if size_ratio > 3.0:
+                    continue
                 duplicate = True
                 break
         if not duplicate:

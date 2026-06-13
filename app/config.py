@@ -87,20 +87,20 @@ class CameraSection:
 class VisionSection:
     model_path: str = "yolo11n-pose.pt"
     imgsz: int = 640
-    conf: float = 0.45
+    conf: float = 0.40
     iou: float = 0.55
     classes: list[int] = field(default_factory=lambda: [0])
     inference_fps: float = 5.0
     min_box_area_ratio: float = 0.0015
-    duplicate_foot_dist_px: float = 70.0
-    duplicate_iou: float = 0.35
+    duplicate_foot_dist_px: float = 35.0
+    duplicate_iou: float = 0.65
 
 
 @dataclass(slots=True)
 class TrackerSection:
     keep_sec: float = 3.5
-    match_distance_px: float = 120.0
-    iou_match: float = 0.20
+    match_distance_px: float = 100.0
+    iou_match: float = 0.10
     smoothing: float = 0.65
     min_hits: int = 1
     max_history: int = 80
