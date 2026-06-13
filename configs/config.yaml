@@ -1,0 +1,68 @@
+﻿app:
+  name: VISION STABLE
+  data_dir: data
+
+camera:
+  id: hikvision_01
+  rtsp_url: ${RTSP_URL}
+  backend: ffmpeg
+  buffer_size: 1
+  reconnect_delay_sec: 1.5
+  read_fail_limit: 20
+  ffmpeg_capture_options: rtsp_transport;tcp|max_delay;500000|stimeout;5000000
+
+vision:
+  model_path: ${MODEL_PATH:yolo11n-pose.pt}
+  imgsz: 640
+  conf: 0.45
+  iou: 0.55
+  classes: [0]
+  inference_fps: 4.0
+  min_box_area_ratio: 0.0015
+  duplicate_foot_dist_px: 70.0
+  duplicate_iou: 0.35
+
+tracker:
+  keep_sec: 3.5
+  match_distance_px: 120.0
+  iou_match: 0.20
+  smoothing: 0.65
+  min_hits: 1
+  max_history: 80
+
+mqtt:
+  enabled: true
+  host: ${MQTT_HOST}
+  port: ${MQTT_PORT:1883}
+  username: ${MQTT_USER}
+  password: ${MQTT_PASSWORD}
+  prefix: ${MQTT_PREFIX:frigate}
+  client_id: vision_stable_pose
+  queue_size: 500
+  publish_tracks_hz: 5.0
+
+calibration:
+  file: data/calibration.json
+  room_width_m: 2.5
+  room_depth_m: 2.5
+  aim_px: 320
+  aim_py: 240
+  floor_points: []
+  camera_height_m: 2.5
+  camera_pitch_deg: 45.0
+  camera_yaw_deg: 0.0
+  camera_roll_deg: 0.0
+  hfov_deg: 90.0
+  vfov_deg: 55.0
+  rotation_deg: 0.0
+  lens_distortion_k1: 0.0
+  lens_distortion_k2: 0.0
+
+ui:
+  enabled: true
+  window_width: 1600
+  window_height: 900
+  panel_width: 380
+  show_pose: true
+  show_tracks: true
+  show_calibration: true

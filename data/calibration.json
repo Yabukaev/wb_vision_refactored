@@ -1,0 +1,53 @@
+{
+  "room_width_m": 0.4,
+  "room_depth_m": 0.4,
+  "aim_px": 1314,
+  "aim_py": 743,
+  "floor_points": [
+    [
+      312.0,
+      436.0
+    ],
+    [
+      371.0,
+      436.0
+    ],
+    [
+      362.0,
+      366.0
+    ],
+    [
+      306.0,
+      372.0
+    ]
+  ],
+  "world_points": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      0.4,
+      0.0
+    ],
+    [
+      0.4,
+      0.4
+    ],
+    [
+      0.0,
+      0.4
+    ]
+  ],
+  "camera_height_m": 2.5,
+  "camera_pitch_deg": 45.0,
+  "camera_yaw_deg": 0.0,
+  "camera_roll_deg": 0.0,
+  "hfov_deg": 90.0,
+  "vfov_deg": 55.0,
+  "rotation_deg": 0.0,
+  "lens_distortion_k1": 0.0,
+  "lens_distortion_k2": 0.0,
+  "created_at": 1778504911.8164046,
+  "updated_at": 1778698981.3766575
+}

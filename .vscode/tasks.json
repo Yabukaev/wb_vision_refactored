@@ -1,0 +1,34 @@
+﻿{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Install dependencies",
+      "type": "shell",
+      "command": "powershell",
+      "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\install.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Run WB Vision",
+      "type": "shell",
+      "command": "powershell",
+      "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\run.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Run WB Vision headless",
+      "type": "shell",
+      "command": "powershell",
+      "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\run_headless.ps1"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Compile check",
+      "type": "shell",
+      "command": "powershell",
+      "args": ["-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\check.ps1"],
+      "problemMatcher": []
+    }
+  ]
+}
+

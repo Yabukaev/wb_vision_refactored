@@ -1,0 +1,2 @@
+﻿"""MQTT output worker."""
+

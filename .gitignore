@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Virtualenv and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Offline wheel cache and model weights
+wheelhouse/
+*.pt
+
+# Manual backups (superseded by git)
+backups/
+
+# Logs and runtime artifacts
+logs/

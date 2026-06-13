@@ -1,0 +1,202 @@
+﻿from __future__ import annotations
+
+import os
+import re
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}")
+
+
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+def _expand_env(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    if not isinstance(value, str):
+        return value
+
+    def repl(match: re.Match[str]) -> str:
+        name = match.group(1)
+        default = match.group(2) or ""
+        return os.getenv(name, default)
+
+    expanded = _ENV_PATTERN.sub(repl, value)
+    if expanded.isdigit():
+        return int(expanded)
+    try:
+        if expanded and re.fullmatch(r"[-+]?\d+\.\d+", expanded):
+            return float(expanded)
+    except Exception:
+        pass
+    return expanded
+
+
+@dataclass(slots=True)
+class AppSection:
+    name: str = "VISION STABLE"
+    data_dir: str = "data"
+
+
+@dataclass(slots=True)
+class CameraSection:
+    id: str = "hikvision_01"
+    rtsp_url: str = ""
+    backend: str = "ffmpeg"
+    buffer_size: int = 1
+    reconnect_delay_sec: float = 1.5
+    read_fail_limit: int = 20
+    ffmpeg_capture_options: str = "rtsp_transport;tcp|max_delay;500000|stimeout;5000000"
+
+
+@dataclass(slots=True)
+class VisionSection:
+    model_path: str = "yolo11n-pose.pt"
+    imgsz: int = 640
+    conf: float = 0.45
+    iou: float = 0.55
+    classes: list[int] = field(default_factory=lambda: [0])
+    inference_fps: float = 5.0
+    min_box_area_ratio: float = 0.0015
+    duplicate_foot_dist_px: float = 70.0
+    duplicate_iou: float = 0.35
+
+
+@dataclass(slots=True)
+class TrackerSection:
+    keep_sec: float = 3.5
+    match_distance_px: float = 120.0
+    iou_match: float = 0.20
+    smoothing: float = 0.65
+    min_hits: int = 1
+    max_history: int = 80
+
+
+@dataclass(slots=True)
+class MqttSection:
+    enabled: bool = True
+    host: str = ""
+    port: int = 1883
+    username: str = ""
+    password: str = ""
+    prefix: str = "frigate"
+    client_id: str = "vision_stable_pose"
+    queue_size: int = 500
+    publish_tracks_hz: float = 5.0
+
+
+@dataclass(slots=True)
+class CalibrationSection:
+    file: str = "data/calibration.json"
+
+    room_width_m: float = 2.5
+    room_depth_m: float = 2.5
+
+    aim_px: int = 320
+    aim_py: int = 240
+    floor_points: list[list[float]] = field(default_factory=list)
+
+    camera_height_m: float = 2.5
+    camera_pitch_deg: float = 45.0
+    camera_yaw_deg: float = 0.0
+    camera_roll_deg: float = 0.0
+    hfov_deg: float = 90.0
+    vfov_deg: float = 55.0
+    rotation_deg: float = 0.0
+    lens_distortion_k1: float = 0.0
+    lens_distortion_k2: float = 0.0
+
+
+@dataclass(slots=True)
+class UISection:
+    enabled: bool = True
+    window_width: int = 1600
+    window_height: int = 900
+    panel_width: int = 380
+    show_pose: bool = True
+    show_tracks: bool = True
+    show_calibration: bool = True
+
+
+@dataclass(slots=True)
+class Settings:
+    root_dir: Path
+    config_path: Path
+    app: AppSection = field(default_factory=AppSection)
+    camera: CameraSection = field(default_factory=CameraSection)
+    vision: VisionSection = field(default_factory=VisionSection)
+    tracker: TrackerSection = field(default_factory=TrackerSection)
+    mqtt: MqttSection = field(default_factory=MqttSection)
+    calibration: CalibrationSection = field(default_factory=CalibrationSection)
+    ui: UISection = field(default_factory=UISection)
+
+
+def _section(cls: type, data: dict[str, Any]) -> Any:
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise TypeError(f"Config section {cls.__name__} must be a mapping/dict, got {type(data).__name__}: {data!r}")
+    allowed = set(cls.__dataclass_fields__.keys())  # type: ignore[attr-defined]
+    return cls(**{k: v for k, v in data.items() if k in allowed})
+
+
+class ConfigManager:
+    """Single source of runtime configuration."""
+
+    def __init__(self, config_path: str | Path = "configs/config.yaml") -> None:
+        self._lock = threading.RLock()
+        self.root_dir = Path.cwd()
+        self.config_path = Path(config_path)
+        if not self.config_path.is_absolute():
+            self.config_path = self.root_dir / self.config_path
+        self.settings = self._load()
+
+    def _load(self) -> Settings:
+        _load_dotenv(self.root_dir / ".env")
+        if not self.config_path.exists():
+            raise FileNotFoundError(f"Config not found: {self.config_path}")
+        raw = yaml.safe_load(self.config_path.read_text(encoding="utf-8-sig")) or {}
+        raw = _expand_env(raw)
+        return Settings(
+            root_dir=self.root_dir,
+            config_path=self.config_path,
+            app=_section(AppSection, raw.get("app", {})),
+            camera=_section(CameraSection, raw.get("camera", {})),
+            vision=_section(VisionSection, raw.get("vision", {})),
+            tracker=_section(TrackerSection, raw.get("tracker", {})),
+            mqtt=_section(MqttSection, raw.get("mqtt", {})),
+            calibration=_section(CalibrationSection, raw.get("calibration", {})),
+            ui=_section(UISection, raw.get("ui", {})),
+        )
+
+    def reload(self) -> Settings:
+        with self._lock:
+            self.settings = self._load()
+            return self.settings
+
+    def get(self) -> Settings:
+        with self._lock:
+            return self.settings
+
+    def resolve_path(self, path: str | Path) -> Path:
+        p = Path(path)
+        if p.is_absolute():
+            return p
+        return self.root_dir / p

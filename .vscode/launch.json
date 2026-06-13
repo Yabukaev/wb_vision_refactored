@@ -1,0 +1,26 @@
+﻿{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "WB Vision UI",
+      "type": "python",
+      "request": "launch",
+      "module": "app.main",
+      "args": ["--config", "configs/config.yaml"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "WB Vision Headless",
+      "type": "python",
+      "request": "launch",
+      "module": "app.main",
+      "args": ["--config", "configs/config.yaml", "--headless"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
+
