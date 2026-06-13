@@ -5,7 +5,7 @@ import logging
 import math
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 import cv2
@@ -16,42 +16,26 @@ from app.types import GeoPoint
 
 log = logging.getLogger("calibration")
 
-# Calibration modes
-CAL_MODE_XY = "xy"            # user enters real-world X,Y per point (tape measure)
-CAL_MODE_LASER = "laser_angle" # user enters laser distance + compass angle per point
-CAL_MODE_HYBRID = "hybrid"    # user enters X,Y + optional measured distance for validation
-CAL_MODES = (CAL_MODE_XY, CAL_MODE_LASER, CAL_MODE_HYBRID)
-
-_MODE_LABELS = {
-    CAL_MODE_XY:     "XY coords",
-    CAL_MODE_LASER:  "Laser+angle",
-    CAL_MODE_HYBRID: "Hybrid",
-}
-
-_MODE_ENTRY_FIELDS: dict[str, list[tuple[str, str]]] = {
-    CAL_MODE_XY:     [("x_m", "X from AIM, m"), ("y_m", "Y from AIM, m")],
-    CAL_MODE_LASER:  [("dist_m", "Dist from AIM, m"), ("angle_deg", "Angle, deg")],
-    CAL_MODE_HYBRID: [("x_m", "X from AIM, m"), ("y_m", "Y from AIM, m"), ("dist_m", "Dist (check), m")],
-}
-
-
-def mode_entry_fields(mode: str) -> list[tuple[str, str]]:
-    return _MODE_ENTRY_FIELDS.get(mode, _MODE_ENTRY_FIELDS[CAL_MODE_XY])
-
-
-def mode_label(mode: str) -> str:
-    return _MODE_LABELS.get(mode, mode)
-
 
 @dataclass(slots=True)
 class CalibrationData:
+    """Floor calibration: 4 floor pixels -> room rectangle homography.
+
+    The model is intentionally simple — everything is computed from:
+      * floor_points: 4 pixel corners clicked clockwise on the floor
+      * room_width_m / room_depth_m: the real size of that rectangle
+      * aim_px / aim_py: the floor point the camera sits above
+      * camera_height_m: lens height above the floor
+    Distances are then derived automatically.
+    """
+
     room_width_m: float = 2.5
     room_depth_m: float = 2.5
 
     aim_px: int = 320
     aim_py: int = 240
-    floor_points: list | None = None    # legacy: 4 pixel corners
-    world_points: list | None = None    # legacy: 4 world corners
+    floor_points: list | None = None    # 4 pixel corners clockwise
+    world_points: list | None = None    # 4 world corners (derived from room size)
 
     camera_height_m: float = 2.5
     camera_pitch_deg: float = 45.0
@@ -63,13 +47,7 @@ class CalibrationData:
     lens_distortion_k1: float = 0.0
     lens_distortion_k2: float = 0.0
 
-    # New calibration system
-    cal_mode: str = CAL_MODE_XY
-    cam_to_aim_m: float = 0.0          # laser: AIM point → camera lens (metres)
-    camera_floor_x_m: float = 0.0     # camera floor-projection X offset from AIM (0 = above AIM)
-    camera_floor_y_m: float = 0.0     # camera floor-projection Y offset from AIM
-    cal_points: list | None = None     # list of dicts {px,py,x_m,y_m,dist_m,angle_deg}
-    zones: list | None = None          # list of dicts {name, polygon_px, color}
+    zones: list | None = None           # list of dicts {name, polygon_px, color}
 
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -79,21 +57,18 @@ class CalibrationData:
             self.floor_points = []
         if self.world_points is None:
             self.world_points = []
-        if self.cal_points is None:
-            self.cal_points = []
         if self.zones is None:
             self.zones = []
 
 
 class CalibrationManager:
-    """Floor calibration: 3 modes (XY / laser-angle / hybrid) + legacy homography fallback."""
+    """Homography-based floor calibration plus editable camera geometry."""
 
     NUMERIC_FIELDS = {
         "room_width_m", "room_depth_m",
         "camera_height_m", "camera_pitch_deg", "camera_yaw_deg", "camera_roll_deg",
         "hfov_deg", "vfov_deg", "rotation_deg",
         "lens_distortion_k1", "lens_distortion_k2",
-        "cam_to_aim_m", "camera_floor_x_m", "camera_floor_y_m",
     }
 
     def __init__(self, config: ConfigManager) -> None:
@@ -142,8 +117,6 @@ class CalibrationManager:
                 if key in raw:
                     setattr(data, key, float(raw[key]))
 
-            data.cal_mode = str(raw.get("cal_mode", data.cal_mode))
-            data.cal_points = list(raw.get("cal_points", []))
             data.zones = list(raw.get("zones", []))
             data.created_at = float(raw.get("created_at", data.created_at))
             data.updated_at = float(raw.get("updated_at", raw.get("created_at", data.updated_at)))
@@ -156,6 +129,7 @@ class CalibrationManager:
 
     def save(self) -> None:
         with self._lock:
+            self.data.world_points = self._world_points_locked()
             self.data.updated_at = time.time()
             if not self.data.created_at:
                 self.data.created_at = self.data.updated_at
@@ -181,50 +155,31 @@ class CalibrationManager:
             self.data.aim_py = int(y)
             self.save()
 
-    def set_cal_mode(self, mode: str) -> None:
-        if mode not in CAL_MODES:
-            return
+    def set_room_size(self, width_m: float, depth_m: float) -> None:
         with self._lock:
-            self.data.cal_mode = mode
+            self.data.room_width_m = float(width_m)
+            self.data.room_depth_m = float(depth_m)
             self._invalidate_locked()
             self.save()
 
-    # ── calibration points management ─────────────────────────────────────────
+    # ── floor points (4-corner calibration) ───────────────────────────────────
 
-    def add_cal_point(
-        self,
-        px: int, py: int,
-        x_m: float = 0.0, y_m: float = 0.0,
-        dist_m: float = 0.0, angle_deg: float = 0.0,
-    ) -> int:
+    def clear_floor_points(self) -> None:
         with self._lock:
-            pts = self.data.cal_points or []
-            pts.append({
-                "px": int(px), "py": int(py),
-                "x_m": float(x_m), "y_m": float(y_m),
-                "dist_m": float(dist_m), "angle_deg": float(angle_deg),
-            })
-            self.data.cal_points = pts
-            self._invalidate_locked()
-            self.save()
-            return len(pts)
-
-    def remove_last_cal_point(self) -> None:
-        with self._lock:
-            pts = self.data.cal_points or []
-            if pts:
-                pts.pop()
-                self.data.cal_points = pts
-                self._invalidate_locked()
-                self.save()
-
-    def clear_cal_points(self) -> None:
-        with self._lock:
-            self.data.cal_points = []
+            self.data.floor_points = []
             self._invalidate_locked()
             self.save()
 
-    # ── zone management ──────────────────────────────────────────────────────
+    def add_floor_point(self, x: int, y: int) -> int:
+        with self._lock:
+            if len(self.data.floor_points or []) >= 4:
+                self.data.floor_points = []
+            self.data.floor_points.append([float(x), float(y)])
+            self._invalidate_locked()
+            self.save()
+            return len(self.data.floor_points)
+
+    # ── zone management ────────────────────────────────────────────────────────
 
     def add_zone(self, name: str, polygon_px: list, color: list | None = None) -> None:
         _color = color or [0, 200, 200]
@@ -251,90 +206,41 @@ class CalibrationManager:
             self.data.zones = []
             self.save()
 
-    # Legacy floor-points API (kept for fallback)
-
-    def clear_floor_points(self) -> None:
-        with self._lock:
-            self.data.floor_points = []
-            self._invalidate_locked()
-            self.save()
-
-    def add_floor_point(self, x: int, y: int) -> int:
-        with self._lock:
-            if len(self.data.floor_points or []) >= 4:
-                self.data.floor_points = []
-            self.data.floor_points.append([float(x), float(y)])
-            self._invalidate_locked()
-            self.save()
-            return len(self.data.floor_points)
-
-    def set_room_size(self, width_m: float, depth_m: float) -> None:
-        with self._lock:
-            self.data.room_width_m = float(width_m)
-            self.data.room_depth_m = float(depth_m)
-            self._invalidate_locked()
-            self.save()
-
-    # ── coordinate mapping ────────────────────────────────────────────────────
+    # ── coordinate mapping ─────────────────────────────────────────────────────
 
     def pixel_to_floor(self, px: float, py: float) -> Optional[GeoPoint]:
         with self._lock:
             H = self._homography_locked()
-            pts_cal = list(self.data.cal_points or [])
-            mode = self.data.cal_mode
-            cam_to_aim = float(self.data.cam_to_aim_m)
-            cx = float(self.data.camera_floor_x_m)
-            cy = float(self.data.camera_floor_y_m)
-            cam_h = float(self.data.camera_height_m)
             width = float(self.data.room_width_m)
             depth = float(self.data.room_depth_m)
+            cam_h = float(self.data.camera_height_m)
+            aim_px = float(self.data.aim_px)
+            aim_py = float(self.data.aim_py)
             fp = list(self.data.floor_points or [])
             zones_data = list(self.data.zones or [])
 
         if H is None:
             log.debug(
-                "pixel_to_floor px=(%.0f,%.0f) -> no homography (cal_points<4 or invalid)",
+                "pixel_to_floor px=(%.0f,%.0f) -> no homography (need 4 floor points)",
                 px, py,
             )
             return None
 
-        p = np.array([[[float(px), float(py)]]], dtype=np.float32)
-        out = cv2.perspectiveTransform(p, H)[0][0]
-        x_m, y_m = float(out[0]), float(out[1])
+        # Person foot -> floor metres
+        x_m, y_m = self._project(H, px, py)
+        # AIM (camera ground spot) -> floor metres
+        ax_m, ay_m = self._project(H, aim_px, aim_py)
 
-        # Floor distance from AIM
-        dist_floor = math.sqrt(x_m * x_m + y_m * y_m)
+        # Floor distance from AIM, and 3D distance from the camera lens
+        # (camera assumed directly above AIM at camera_height_m).
+        dist_floor = math.hypot(x_m - ax_m, y_m - ay_m)
+        dist_cam = math.sqrt(dist_floor * dist_floor + cam_h * cam_h)
 
-        # Camera 3D position relative to AIM:
-        # cam_to_aim_m is the straight-line laser distance AIM → lens.
-        # camera_floor_x/y_m is where the camera projects onto the floor.
-        if cam_to_aim > 0:
-            r2 = cx * cx + cy * cy
-            cz = math.sqrt(max(0.0, cam_to_aim * cam_to_aim - r2))
-        else:
-            cz = cam_h
-            cx = cy = 0.0
-
-        dist_cam = math.sqrt((x_m - cx) ** 2 + (y_m - cy) ** 2 + cz * cz)
-
-        # inside_calibration_zone: pixel polygon test
-        if pts_cal:
-            pix = np.array([[pt["px"], pt["py"]] for pt in pts_cal], dtype=np.int32)
-            hull = cv2.convexHull(pix)
-            inside_cal = cv2.pointPolygonTest(hull, (float(px), float(py)), False) >= 0
-            world_xys = [_point_to_xy(pt, mode) for pt in pts_cal]
-            min_x = min(w[0] for w in world_xys)
-            max_x = max(w[0] for w in world_xys)
-            min_y = min(w[1] for w in world_xys)
-            max_y = max(w[1] for w in world_xys)
-            inside_room = min_x <= x_m <= max_x and min_y <= y_m <= max_y
-        else:
-            inside_room = 0 <= x_m <= width and 0 <= y_m <= depth
-            pts_arr = np.array(fp, dtype=np.int32)
-            inside_cal = (
-                cv2.pointPolygonTest(pts_arr, (float(px), float(py)), False) >= 0
-                if len(fp) >= 3 else False
-            )
+        inside_room = 0.0 <= x_m <= width and 0.0 <= y_m <= depth
+        inside_cal = (
+            cv2.pointPolygonTest(np.array(fp, dtype=np.int32), (float(px), float(py)), False) >= 0
+            if len(fp) == 4 else False
+        )
 
         zone_name = ""
         for zone in zones_data:
@@ -360,36 +266,29 @@ class CalibrationManager:
             zone=zone_name,
         )
 
-    # ── internal ──────────────────────────────────────────────────────────────
+    # ── internal ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _project(H: np.ndarray, px: float, py: float) -> tuple[float, float]:
+        p = np.array([[[float(px), float(py)]]], dtype=np.float32)
+        out = cv2.perspectiveTransform(p, H)[0][0]
+        return float(out[0]), float(out[1])
+
+    def _world_points_locked(self) -> list[list[float]]:
+        w, d = float(self.data.room_width_m), float(self.data.room_depth_m)
+        return [[0.0, 0.0], [w, 0.0], [w, d], [0.0, d]]
 
     def _homography_locked(self) -> Optional[np.ndarray]:
         if self._H is not None:
             return self._H
-
-        pts_cal = self.data.cal_points or []
-        mode = self.data.cal_mode
-
-        if len(pts_cal) >= 4:
-            src = np.array([[float(pt["px"]), float(pt["py"])] for pt in pts_cal], dtype=np.float32)
-            dst = np.array([list(_point_to_xy(pt, mode)) for pt in pts_cal], dtype=np.float32)
-            method = cv2.RANSAC if len(pts_cal) > 4 else 0
-            H, _ = cv2.findHomography(src, dst, method)
-            self._H = H
-            return H
-
-        # Legacy: 4 floor pixels → room rectangle
         fp = self.data.floor_points or []
         if len(fp) != 4:
             return None
         src = np.array(fp, dtype=np.float32)
-        dst = np.array(self._legacy_world_points(), dtype=np.float32)
+        dst = np.array(self._world_points_locked(), dtype=np.float32)
         H, _ = cv2.findHomography(src, dst)
         self._H = H
         return H
-
-    def _legacy_world_points(self) -> list[list[float]]:
-        w, d = float(self.data.room_width_m), float(self.data.room_depth_m)
-        return [[0.0, 0.0], [w, 0.0], [w, d], [0.0, d]]
 
     def _invalidate_locked(self) -> None:
         self._H = None
@@ -399,30 +298,3 @@ class CalibrationManager:
         with self._lock:
             self.data = self._load()
             self._invalidate_locked()
-
-    # hybrid mode: validate inter-point distances (returns list of (idx_a, idx_b, measured, computed, error_m))
-    def validate_hybrid_distances(self) -> list[tuple[int, int, float, float, float]]:
-        pts = self.data.cal_points or []
-        mode = self.data.cal_mode
-        if mode != CAL_MODE_HYBRID or len(pts) < 2:
-            return []
-        results = []
-        for i in range(len(pts) - 1):
-            a, b = pts[i], pts[i + 1]
-            ax, ay = _point_to_xy(a, mode)
-            bx, by = _point_to_xy(b, mode)
-            computed = math.sqrt((bx - ax) ** 2 + (by - ay) ** 2)
-            measured = float(b.get("dist_m", 0.0))
-            if measured > 0:
-                results.append((i, i + 1, measured, computed, abs(measured - computed)))
-        return results
-
-
-def _point_to_xy(pt: dict, mode: str) -> tuple[float, float]:
-    """Convert a cal_point dict to world (x_m, y_m) based on calibration mode."""
-    if mode == CAL_MODE_LASER:
-        rad = math.radians(float(pt.get("angle_deg", 0.0)))
-        dist = float(pt.get("dist_m", 0.0))
-        return dist * math.sin(rad), dist * math.cos(rad)
-    # xy and hybrid: use direct x_m, y_m
-    return float(pt.get("x_m", 0.0)), float(pt.get("y_m", 0.0))

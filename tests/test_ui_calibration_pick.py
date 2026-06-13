@@ -1,19 +1,18 @@
-"""UIWorker calibration point-pick flow.
+"""UIWorker floor-point calibration flow.
 
-Regression guard for the bug where '+ Add point' started pick mode and then
-immediately cancelled it (point_pick_active flipped back to False inside
-_start_point_pick -> _point_entry_cancel), so clicking the video never placed
-a point. Points must place by clicking (like zones) and record per mode.
+Points are placed by clicking the video (like zones): F / 'Set 4 floor points'
+arms floor4 mode, then each video click adds a corner and the 4th finishes.
 """
 from __future__ import annotations
 
 import threading
 
+import cv2
 import pytest
 
 from app.config import ConfigManager
 from app.core.latest_value import LatestValue
-from app.vision.calibration import CAL_MODE_XY, CAL_MODE_HYBRID, CalibrationManager
+from app.vision.calibration import CalibrationManager
 from app.ui.ui_worker import UIWorker
 
 CONFIG_YAML = """
@@ -34,61 +33,51 @@ def worker(tmp_path, monkeypatch) -> UIWorker:
     cfg.write_text(CONFIG_YAML.format(cal_file=cal_file), encoding="utf-8")
     settings = ConfigManager(cfg).get()
     calibration = CalibrationManager(ConfigManager(cfg))
-    return UIWorker(
-        settings.ui,
-        LatestValue(),
-        LatestValue(),
-        calibration,
-        threading.Event(),
-    )
+    w = UIWorker(settings.ui, LatestValue(), LatestValue(), calibration, threading.Event())
+    # Identity video geometry so screen coords == frame coords.
+    w.scale = 1.0
+    w.off_x = w.off_y = 0
+    w.draw_w = w.draw_h = w.src_w = w.src_h = 200
+    return w
 
 
-def test_start_point_pick_leaves_pick_active(worker):
-    worker._start_point_pick()
-    assert worker.point_pick_active is True
-    assert worker.pending_px is None
-    assert worker.aim_mode is False
+def _click(worker: UIWorker, x: int, y: int) -> None:
+    worker._mouse_cb(cv2.EVENT_LBUTTONDOWN, x, y, 0, None)
 
 
-def _simulate_video_click(worker, fx: int, fy: int) -> None:
-    """Mimic what _mouse_cb does for a video click in pick mode."""
-    from app.vision.calibration import mode_entry_fields
+def test_floor4_button_arms_mode(worker):
+    worker._handle_button("floor4")
+    assert worker.calib_mode == "floor4"
+    assert worker.calibration.snapshot().floor_points == []
 
-    assert worker.point_pick_active is True, "pick mode must be active to place a point"
-    worker.pending_px = fx
-    worker.pending_py = fy
-    worker.point_pick_active = False
+
+def test_four_clicks_record_floor_points(worker):
+    worker._handle_button("floor4")
+    for (x, y) in ((10, 10), (190, 10), (190, 190), (10, 190)):
+        _click(worker, x, y)
+    pts = worker.calibration.snapshot().floor_points
+    assert len(pts) == 4
+    assert pts[0] == [10.0, 10.0]
+    assert worker.calib_mode is None  # auto-finished after the 4th
+
+
+def test_aim_click_sets_aim(worker):
+    worker._handle_button("aim")
+    assert worker.calib_mode == "aim"
+    _click(worker, 123, 45)
     cal = worker.calibration.snapshot()
-    worker.point_entry_fields = mode_entry_fields(cal.cal_mode)
-    worker.point_entry_cursor = 0
-    worker.point_entry_buf = ""
-    worker.point_entry_values = {}
+    assert cal.aim_px == 123 and cal.aim_py == 45
+    assert worker.calib_mode is None
 
 
-def test_full_point_entry_records_xy(worker):
-    worker.calibration.set_cal_mode(CAL_MODE_XY)
-    worker._start_point_pick()
-    _simulate_video_click(worker, 100, 200)
-
-    worker.point_entry_buf = "1.5"
-    worker._point_entry_advance()  # x_m
-    worker.point_entry_buf = "2.0"
-    worker._point_entry_advance()  # y_m -> commits
-
-    pts = worker.calibration.snapshot().cal_points
-    assert len(pts) == 1
-    assert pts[0]["px"] == 100 and pts[0]["py"] == 200
-    assert pts[0]["x_m"] == pytest.approx(1.5)
-    assert pts[0]["y_m"] == pytest.approx(2.0)
-    assert worker.pending_px is None  # entry finished
-
-
-def test_mode_switch_changes_entry_fields(worker):
-    from app.vision.calibration import mode_entry_fields
-
-    worker.calibration.set_cal_mode(CAL_MODE_XY)
-    xy_fields = mode_entry_fields(worker.calibration.snapshot().cal_mode)
-    worker.calibration.set_cal_mode(CAL_MODE_HYBRID)
-    hybrid_fields = mode_entry_fields(worker.calibration.snapshot().cal_mode)
-    assert xy_fields != hybrid_fields
-    assert len(hybrid_fields) == 3
+def test_zone_draw_still_works(worker):
+    worker._handle_button("zone_draw")
+    assert worker.zone_draw_active is True
+    for (x, y) in ((20, 20), (40, 20), (40, 40)):
+        _click(worker, x, y)
+    assert len(worker.zone_polygon_px) == 3
+    worker._handle_button("zone_finish")
+    worker.zone_name_buf = "shower"
+    worker._save_zone()
+    zones = worker.calibration.snapshot().zones
+    assert len(zones) == 1 and zones[0]["name"] == "shower"

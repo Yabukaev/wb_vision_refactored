@@ -1,10 +1,7 @@
-"""Coordinate tests for the NEW cal_points homography path + debug logging.
+"""Coordinate tests for the floor-points homography + camera distance + logging.
 
-The legacy floor_points path is covered by test_calibration.py. The cal_points
-path (3 modes: xy / laser / hybrid) is what the live UI uses, and it had no
-coordinate characterization test. These lock the px -> metres math and verify
-that pixel_to_floor emits diagnostic debug logs (step 1 of the MVP fix plan in
-ANALYSIS_POSITIONING.md).
+Simple model: 4 floor pixels map to the room rectangle; the camera sits above
+AIM at camera_height_m, so distance from camera is derived automatically.
 """
 from __future__ import annotations
 
@@ -34,53 +31,47 @@ def manager(tmp_path, monkeypatch) -> CalibrationManager:
     return CalibrationManager(ConfigManager(cfg))
 
 
-def _calibrate_square_xy(manager: CalibrationManager) -> None:
-    """100x100 px square mapped to a 2.0x2.0 m square in XY (tape) mode."""
-    manager.set_cal_mode("xy")
-    for (px, py), (x_m, y_m) in (
-        ((0, 0), (0.0, 0.0)),
-        ((100, 0), (2.0, 0.0)),
-        ((100, 100), (2.0, 2.0)),
-        ((0, 100), (0.0, 2.0)),
-    ):
-        manager.add_cal_point(px, py, x_m=x_m, y_m=y_m)
+def _calibrate_square(manager: CalibrationManager) -> None:
+    """100x100 px square -> 2.0x2.0 m room, clockwise from top-left."""
+    for x, y in ((0, 0), (100, 0), (100, 100), (0, 100)):
+        manager.add_floor_point(x, y)
 
 
-def test_cal_points_requires_four_points(manager):
-    manager.set_cal_mode("xy")
-    manager.add_cal_point(0, 0, x_m=0.0, y_m=0.0)
+def test_requires_four_points(manager):
+    manager.add_floor_point(0, 0)
     assert manager.pixel_to_floor(50, 50) is None
 
 
-def test_cal_points_xy_maps_center(manager):
-    _calibrate_square_xy(manager)
+def test_maps_center(manager):
+    _calibrate_square(manager)
     geo = manager.pixel_to_floor(50, 50)
     assert geo is not None
     assert geo.x_m == pytest.approx(1.0, abs=1e-3)
     assert geo.y_m == pytest.approx(1.0, abs=1e-3)
+    assert geo.inside_room is True
+    assert geo.inside_calibration_zone is True
 
 
-def test_cal_points_xy_maps_corner(manager):
-    _calibrate_square_xy(manager)
-    geo = manager.pixel_to_floor(100, 100)
+def test_distance_from_camera(manager):
+    _calibrate_square(manager)
+    manager.set_aim(50, 50)              # AIM at floor centre -> (1,1) m
+    manager.set_value("camera_height_m", 2.0)
+    geo = manager.pixel_to_floor(50, 50)  # foot at same spot -> floor dist 0
     assert geo is not None
-    assert geo.x_m == pytest.approx(2.0, abs=1e-3)
-    assert geo.y_m == pytest.approx(2.0, abs=1e-3)
+    assert geo.distance_m == pytest.approx(0.0, abs=1e-3)
+    assert geo.distance_cam_m == pytest.approx(2.0, abs=1e-3)  # straight down: just height
 
 
-def test_pixel_to_floor_emits_debug_log(manager, caplog):
-    _calibrate_square_xy(manager)
+def test_emits_debug_log(manager, caplog):
+    _calibrate_square(manager)
     with caplog.at_level(logging.DEBUG, logger="calibration"):
         manager.pixel_to_floor(50, 50)
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("pixel_to_floor" in m for m in msgs), msgs
+    assert any("pixel_to_floor" in r.getMessage() for r in caplog.records)
 
 
-def test_pixel_to_floor_logs_when_no_homography(manager, caplog):
-    manager.set_cal_mode("xy")
-    manager.add_cal_point(0, 0, x_m=0.0, y_m=0.0)  # only 1 point -> H is None
+def test_logs_when_no_homography(manager, caplog):
+    manager.add_floor_point(0, 0)  # only 1 point -> H is None
     with caplog.at_level(logging.DEBUG, logger="calibration"):
         result = manager.pixel_to_floor(50, 50)
     assert result is None
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("no homography" in m for m in msgs), msgs
+    assert any("no homography" in r.getMessage() for r in caplog.records)
