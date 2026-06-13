@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -11,6 +12,8 @@ import cv2
 from app.config import CameraSection
 from app.core.latest_value import LatestValue
 from app.types import FramePacket
+
+log = logging.getLogger("rtsp")
 
 
 @dataclass(slots=True)
@@ -36,10 +39,12 @@ class RtspReader(threading.Thread):
         self._cap: Optional[cv2.VideoCapture] = None
         self._last_fps_t = time.monotonic()
         self._fps_counter = 0
+        self._fps_lock = threading.Lock()  # B-07: protect fps EWA calculation
 
     def run(self) -> None:
+        # B-09: set directly (not setdefault) so config always wins
         if self.camera.ffmpeg_capture_options:
-            os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", self.camera.ffmpeg_capture_options)
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = self.camera.ffmpeg_capture_options
 
         bad_reads = 0
         while not self.stop_event.is_set():
@@ -84,7 +89,9 @@ class RtspReader(threading.Thread):
         self._cap = cap
         self.stats.connected = cap.isOpened()
         if not self.stats.connected:
-            self.stats.last_error = "cannot open RTSP"
+            err = "cannot open RTSP"
+            self.stats.last_error = err
+            log.warning("RTSP connect failed: %s — %s", err, self.camera.rtsp_url)  # B-08
 
     def _release(self) -> None:
         if self._cap is not None:
@@ -100,7 +107,7 @@ class RtspReader(threading.Thread):
         dt = now - self._last_fps_t
         if dt >= 1.0:
             inst = self._fps_counter / max(dt, 1e-6)
-            self.stats.fps = inst if self.stats.fps <= 0 else 0.8 * self.stats.fps + 0.2 * inst
+            with self._fps_lock:  # B-07: atomic EWA update
+                self.stats.fps = inst if self.stats.fps <= 0 else 0.8 * self.stats.fps + 0.2 * inst
             self._fps_counter = 0
             self._last_fps_t = now
-
