@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import threading
 from typing import Optional
@@ -9,7 +9,7 @@ import numpy as np
 from app.config import UISection
 from app.core.latest_value import LatestValue
 from app.types import FramePacket, VisionPacket
-from app.vision.calibration import CalibrationManager
+from app.vision.calibration import CalibrationData, CalibrationManager
 from app.vision.overlay import FIELD_ORDER, draw_calibration, draw_panel, draw_tracks
 
 
@@ -48,6 +48,10 @@ class UIWorker:
 
         self.fullscreen = False
 
+        # B-18: pre-allocated waiting canvas; rebuilt only on window resize
+        self._waiting_canvas: Optional[np.ndarray] = None
+        self._waiting_canvas_size: tuple[int, int] = (0, 0)
+
     def run(self) -> None:
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, int(self.ui_cfg.window_width), int(self.ui_cfg.window_height))
@@ -66,22 +70,12 @@ class UIWorker:
                     break
                 continue
 
-            frame = frame_packet.image.copy()
-            result, _ = self.results.get()
+            # B-17: single calibration snapshot per frame, passed to both draw calls
             cal = self.calibration.snapshot()
+            result, _ = self.results.get()
 
-            if result is not None:
-                draw_tracks(
-                    frame,
-                    result.tracks,
-                    show_pose=self.ui_cfg.show_pose,
-                    show_tracks=self.ui_cfg.show_tracks,
-                )
-
-            if self.ui_cfg.show_calibration:
-                draw_calibration(frame, cal)
-
-            canvas = self._compose(frame, result)
+            # P-06: draw_tracks and draw_calibration happen inside _compose on resized frame
+            canvas = self._compose(frame_packet.image, result, cal)
             cv2.imshow(self.window_name, canvas)
 
             if self._handle_key(cv2.waitKeyEx(1)):
@@ -91,32 +85,25 @@ class UIWorker:
         cv2.destroyAllWindows()
 
     def _show_waiting(self) -> None:
+        # B-18: reuse pre-allocated canvas; only reallocate when window is resized
         window_w, window_h = self._current_window_size()
-        canvas = np.zeros((window_h, window_w, 3), dtype=np.uint8)
+        if (window_w, window_h) != self._waiting_canvas_size:
+            canvas = np.zeros((window_h, window_w, 3), dtype=np.uint8)
+            lines = [
+                "Waiting for RTSP frame...",
+                "ESC - exit",
+                "A - set aim point",
+                "F - set 4 floor points",
+                "Click field -> type number -> Enter",
+            ]
+            y = 54
+            for line in lines:
+                cv2.putText(canvas, line, (36, y), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (235, 235, 235), 1, cv2.LINE_AA)
+                y += 34
+            self._waiting_canvas = canvas
+            self._waiting_canvas_size = (window_w, window_h)
 
-        lines = [
-            "Waiting for RTSP frame...",
-            "ESC - exit",
-            "A - set aim point",
-            "F - set 4 floor points",
-            "Click field -> type number -> Enter",
-        ]
-
-        y = 54
-        for line in lines:
-            cv2.putText(
-                canvas,
-                line,
-                (36, y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.72,
-                (235, 235, 235),
-                1,
-                cv2.LINE_AA,
-            )
-            y += 34
-
-        cv2.imshow(self.window_name, canvas)
+        cv2.imshow(self.window_name, self._waiting_canvas)
 
     def _current_window_size(self) -> tuple[int, int]:
         try:
@@ -128,10 +115,10 @@ class UIWorker:
 
         return int(self.ui_cfg.window_width), int(self.ui_cfg.window_height)
 
-    def _compose(self, frame: np.ndarray, packet: Optional[VisionPacket]) -> np.ndarray:
+    def _compose(self, frame: np.ndarray, packet: Optional[VisionPacket], cal: CalibrationData) -> np.ndarray:
+        # B-17: accepts cal snapshot from run() — no second snapshot() call here
         window_w, window_h = self._current_window_size()
 
-        # Auto panel width: not too wide, not too narrow.
         panel_w = int(max(320, min(430, window_w * 0.25)))
         video_w = max(1, window_w - panel_w)
         video_h = window_h
@@ -146,12 +133,24 @@ class UIWorker:
         self.off_y = int((video_h - self.draw_h) / 2)
         self.src_w, self.src_h = fw, fh
 
+        # P-06: resize FIRST, draw overlay on the smaller surface (avoids full-res copy)
         interp = cv2.INTER_AREA if self.scale < 1.0 else cv2.INTER_LINEAR
         resized = cv2.resize(frame, (self.draw_w, self.draw_h), interpolation=interp)
 
+        if result is not None:
+            draw_tracks(
+                resized,
+                result.tracks,
+                scale=self.scale,
+                show_pose=self.ui_cfg.show_pose,
+                show_tracks=self.ui_cfg.show_tracks,
+            )
+
+        if self.ui_cfg.show_calibration:
+            draw_calibration(resized, cal, scale=self.scale)
+
         canvas[self.off_y:self.off_y + self.draw_h, self.off_x:self.off_x + self.draw_w] = resized
 
-        # Subtle border around video.
         cv2.rectangle(
             canvas,
             (self.off_x, self.off_y),
@@ -164,9 +163,7 @@ class UIWorker:
         self.buttons = {}
         self.fields = {}
 
-        cal = self.calibration.snapshot()
         values: dict[str, str] = {}
-
         for key, _label in FIELD_ORDER:
             if self.editing_key == key:
                 values[key] = self.edit_buffer
@@ -252,19 +249,18 @@ class UIWorker:
                 print("Floor calibration saved")
 
     def _handle_key(self, key: int) -> bool:
-        # Normalize OpenCV key values.
         if key == -1:
             return False
 
         low = key & 0xFF
 
         if self.editing_key:
-            if low in (13, 10):  # Enter
+            if low in (13, 10):
                 self._commit_edit()
-            elif low == 27:  # Esc
+            elif low == 27:
                 self.editing_key = None
                 self.edit_buffer = ""
-            elif low in (8, 127):  # Backspace / Delete
+            elif low in (8, 127):
                 self.edit_buffer = self.edit_buffer[:-1]
             elif 0 <= low <= 255:
                 ch = chr(low)

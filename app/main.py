@@ -1,8 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import logging
 import signal
+import sys
 import threading
 import time
 from logging.handlers import RotatingFileHandler
@@ -54,11 +55,28 @@ def main() -> int:
 
     stop_event = threading.Event()
 
-    def request_stop(signum=None, frame=None):  # noqa: ANN001
+    def request_stop(signum=None, frame=None) -> None:  # noqa: ANN001
         stop_event.set()
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+
+    # B-10: on Windows, SIGTERM from outside (NSSM, Task Scheduler) is TerminateProcess
+    # and never reaches Python. Register a console ctrl handler for CTRL_CLOSE_EVENT
+    # so services that send WM_CLOSE / GenerateConsoleCtrlEvent get graceful shutdown.
+    if sys.platform == "win32":
+        import ctypes
+        _HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+
+        def _win_ctrl_handler(ctrl_type: int) -> bool:
+            if ctrl_type in (0, 2, 5, 6):  # C, CLOSE, LOGOFF, SHUTDOWN
+                request_stop()
+                return True
+            return False
+
+        # Keep a module-level reference so the callable isn't GC'd
+        main._win_handler = _HandlerRoutine(_win_ctrl_handler)  # type: ignore[attr-defined]
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(main._win_handler, True)  # type: ignore[attr-defined]
 
     frames: LatestValue[FramePacket] = LatestValue()
     results: LatestValue[VisionPacket] = LatestValue()
@@ -98,8 +116,8 @@ def main() -> int:
                 time.sleep(0.5)
     finally:
         stop_event.set()
-        frames.close()
-        results.close()
+        # B-03: workers own their LatestValue lifecycle (RtspReader closes frames,
+        # InferenceWorker closes results). No redundant close() calls here.
         for worker in (rtsp_reader, inference_worker, mqtt_worker):
             worker.join(timeout=3.0)
         log.info("STOP")
@@ -108,4 +126,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
