@@ -69,7 +69,7 @@ activity:
   clip_fps: 0.5
 
 ui:
-  enabled: true
+  enabled: false          # OpenCV dev window off — control via the web UI (port 8000)
   window_width: 1600
   window_height: 900
   panel_width: 380

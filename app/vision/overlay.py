@@ -77,8 +77,11 @@ def draw_calibration(
         if len(z_pts) >= 3:
             cv2.line(frame, z_pts[-1], z_pts[0], (0, 255, 128), 1, cv2.LINE_AA)
 
-    # Floor calibration quad: thin lines, neat points, translucent fill.
-    pts = [(int(p[0] * scale), int(p[1] * scale)) for p in (cal.floor_points or [])]
+    # Floor calibration quad: prefer the trapezoid corners (quad_px); fall back
+    # to the legacy rectangle floor_points. Thin lines, neat numbered points,
+    # translucent fill once all 4 are placed.
+    corners = cal.quad_px if (cal.quad_px and len(cal.quad_px) > 0) else (cal.floor_points or [])
+    pts = [(int(p[0] * scale), int(p[1] * scale)) for p in corners]
     if len(pts) >= 2:
         for i in range(1, len(pts)):
             cv2.line(frame, pts[i - 1], pts[i], _FLOOR_COLOR, 1, cv2.LINE_AA)
@@ -88,9 +91,9 @@ def draw_calibration(
         cv2.fillPoly(ov, [np.array(pts, dtype=np.int32)], _FLOOR_COLOR)
         cv2.addWeighted(ov, 0.14, frame, 0.86, 0, frame)
     for i, p in enumerate(pts):
-        cv2.circle(frame, p, 4, _FLOOR_COLOR, -1, cv2.LINE_AA)
-        cv2.circle(frame, p, 5, (255, 255, 255), 1, cv2.LINE_AA)
-        _t(frame, str(i + 1), (p[0] + 8, p[1] - 8), 0.45, (255, 255, 255), 1)
+        cv2.circle(frame, p, 5, _FLOOR_COLOR, -1, cv2.LINE_AA)
+        cv2.circle(frame, p, 7, (255, 255, 255), 1, cv2.LINE_AA)
+        _t(frame, "P" + str(i + 1), (p[0] + 9, p[1] - 9), 0.5, (255, 255, 255), 2)
 
     # AIM marker: thin cross + ring + center dot.
     ax, ay = int(cal.aim_px * scale), int(cal.aim_py * scale)
