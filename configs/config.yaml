@@ -3,7 +3,7 @@
   data_dir: data
 
 camera:
-  id: hikvision_01
+  id: ${CAMERA_ID:hikvision_01}
   rtsp_url: ${RTSP_URL}
   backend: ffmpeg
   buffer_size: 1
@@ -27,7 +27,7 @@ tracker:
   match_distance_px: 120.0
   iou_match: 0.20
   smoothing: 0.65
-  min_hits: 1
+  min_hits: 2
   max_history: 80
 
 mqtt:
@@ -40,6 +40,7 @@ mqtt:
   client_id: vision_stable_pose
   queue_size: 500
   publish_tracks_hz: 5.0
+  reconnect_delay_sec: 5.0
 
 calibration:
   file: data/calibration.json

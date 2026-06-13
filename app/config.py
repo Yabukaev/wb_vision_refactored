@@ -38,15 +38,9 @@ def _expand_env(value: Any) -> Any:
         default = match.group(2) or ""
         return os.getenv(name, default)
 
-    expanded = _ENV_PATTERN.sub(repl, value)
-    if expanded.isdigit():
-        return int(expanded)
-    try:
-        if expanded and re.fullmatch(r"[-+]?\d+\.\d+", expanded):
-            return float(expanded)
-    except Exception:
-        pass
-    return expanded
+    # Substituted values stay strings: coercing here corrupts credentials
+    # like "007" or all-digit passwords. Consumers cast explicitly.
+    return _ENV_PATTERN.sub(repl, value)
 
 
 @dataclass(slots=True)
@@ -100,6 +94,7 @@ class MqttSection:
     client_id: str = "vision_stable_pose"
     queue_size: int = 500
     publish_tracks_hz: float = 5.0
+    reconnect_delay_sec: float = 5.0
 
 
 @dataclass(slots=True)
@@ -174,7 +169,7 @@ class ConfigManager:
             raise FileNotFoundError(f"Config not found: {self.config_path}")
         raw = yaml.safe_load(self.config_path.read_text(encoding="utf-8-sig")) or {}
         raw = _expand_env(raw)
-        return Settings(
+        settings = Settings(
             root_dir=self.root_dir,
             config_path=self.config_path,
             app=_section(AppSection, raw.get("app", {})),
@@ -185,6 +180,12 @@ class ConfigManager:
             calibration=_section(CalibrationSection, raw.get("calibration", {})),
             ui=_section(UISection, raw.get("ui", {})),
         )
+        if not str(settings.camera.rtsp_url).strip():
+            raise ValueError(
+                "camera.rtsp_url is empty. Set RTSP_URL in .env "
+                "(see .env.example) or in configs/config.yaml."
+            )
+        return settings
 
     def reload(self) -> Settings:
         with self._lock:
