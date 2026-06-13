@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import threading
 import time
@@ -12,6 +13,8 @@ import numpy as np
 
 from app.config import ConfigManager
 from app.types import GeoPoint
+
+log = logging.getLogger("calibration")
 
 # Calibration modes
 CAL_MODE_XY = "xy"            # user enters real-world X,Y per point (tape measure)
@@ -289,6 +292,10 @@ class CalibrationManager:
             zones_data = list(self.data.zones or [])
 
         if H is None:
+            log.debug(
+                "pixel_to_floor px=(%.0f,%.0f) -> no homography (cal_points<4 or invalid)",
+                px, py,
+            )
             return None
 
         p = np.array([[[float(px), float(py)]]], dtype=np.float32)
@@ -338,6 +345,11 @@ class CalibrationManager:
                     zone_name = zone.get("name", "")
                     break
 
+        log.debug(
+            "pixel_to_floor px=(%.0f,%.0f) -> x_m=%.3f y_m=%.3f dist_floor=%.3f "
+            "dist_cam=%.3f inside_room=%s zone=%r",
+            px, py, x_m, y_m, dist_floor, dist_cam, inside_room, zone_name,
+        )
         return GeoPoint(
             x_m=x_m,
             y_m=y_m,
