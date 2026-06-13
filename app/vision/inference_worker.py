@@ -61,6 +61,7 @@ class InferenceWorker(threading.Thread):
         self._published_track_ids: set[int] = set()
         self._slot_by_id: dict[int, int] = {}
         self._last_zones_pub_ts = 0.0
+        self._last_discovery_ts = 0.0
         self._model_lock = threading.Lock()
         self._pending_pose_model: Optional[str] = None
         self._pending_object_model: Optional[str] = None
@@ -192,6 +193,13 @@ class InferenceWorker(threading.Thread):
                            retain=True)
             except Exception:
                 pass
+
+        # Re-publish discovery periodically: the initial burst can be dropped from
+        # the local queue before the broker connection is up, and this also
+        # re-seeds HA after a broker/HA restart.
+        if self.mqtt_cfg.discovery and now - self._last_discovery_ts >= 60.0:
+            self._last_discovery_ts = now
+            self._publish_discovery()
 
         if now - self._last_health_ts >= 1.0:
             self._last_health_ts = now
