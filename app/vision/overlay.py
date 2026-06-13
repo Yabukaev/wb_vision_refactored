@@ -77,6 +77,12 @@ _MODE_ENTRY_LABELS: dict[str, list[tuple[str, str]]] = {
     CAL_MODE_HYBRID: [("x_m", "X from AIM, m"), ("y_m", "Y from AIM, m"), ("dist_m", "Dist (check), m")],
 }
 
+_MODE_DESC: dict[str, str] = {
+    CAL_MODE_XY:     "Per point: tape X, Y from AIM",
+    CAL_MODE_LASER:  "Per point: laser dist + angle",
+    CAL_MODE_HYBRID: "Per point: XY tape + dist check",
+}
+
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -94,7 +100,36 @@ def draw_calibration(
     scale: float = 1.0,
     pending_px: Optional[int] = None,
     pending_py: Optional[int] = None,
+    zone_polygon_px: Optional[list] = None,
 ) -> None:
+    # Draw saved zones first (behind everything)
+    for zone in (cal.zones or []):
+        poly_px = zone.get("polygon_px", [])
+        if len(poly_px) < 3:
+            continue
+        name = zone.get("name", "zone")
+        color = tuple(int(c) for c in zone.get("color", [0, 200, 200]))
+        pts = np.array([[int(p[0] * scale), int(p[1] * scale)] for p in poly_px], dtype=np.int32)
+        ov = frame.copy()
+        cv2.fillPoly(ov, [pts], color)
+        cv2.addWeighted(ov, 0.18, frame, 0.82, 0, frame)
+        cv2.polylines(frame, [pts], True, color, 2, cv2.LINE_AA)
+        cx_z = int(pts[:, 0].mean())
+        cy_z = int(pts[:, 1].mean())
+        (tw, _th), _ = cv2.getTextSize(name, _FONT, 0.50, 1)
+        cv2.rectangle(frame, (cx_z - tw // 2 - 3, cy_z - 14), (cx_z + tw // 2 + 3, cy_z + 4), (0, 0, 0), -1)
+        _t(frame, name, (cx_z - tw // 2, cy_z), 0.50, (255, 255, 255), 1)
+
+    # Draw in-progress zone polygon
+    if zone_polygon_px:
+        z_pts = [(int(p[0] * scale), int(p[1] * scale)) for p in zone_polygon_px]
+        for i in range(1, len(z_pts)):
+            cv2.line(frame, z_pts[i - 1], z_pts[i], (0, 255, 128), 2, cv2.LINE_AA)
+        for zp in z_pts:
+            cv2.circle(frame, zp, 5, (0, 255, 128), -1, cv2.LINE_AA)
+        if len(z_pts) >= 3:
+            cv2.line(frame, z_pts[-1], z_pts[0], (0, 255, 128), 1, cv2.LINE_AA)
+
     mode = cal.cal_mode
     col = _MODE_COLORS.get(mode, (0, 0, 255))
 
@@ -123,16 +158,6 @@ def draw_calibration(
             cv2.circle(frame, sp, 9, (255, 255, 255), 1, cv2.LINE_AA)
             wx, wy = _point_to_xy(pt, mode)
             _t(frame, f"P{i+1}({wx:.1f},{wy:.1f})", (sp[0] + 10, sp[1] + 5), 0.40, (255, 255, 255), 1)
-
-    elif cal.floor_points:
-        pts = [(int(p[0] * scale), int(p[1] * scale)) for p in cal.floor_points]
-        for i in range(1, len(pts)):
-            cv2.line(frame, pts[i - 1], pts[i], (120, 60, 60), 1)
-        if len(pts) == 4:
-            cv2.line(frame, pts[3], pts[0], (120, 60, 60), 1)
-        for i, p in enumerate(pts):
-            cv2.circle(frame, p, 5, (180, 80, 80), -1)
-            _t(frame, f"L{i+1}", (p[0] + 8, p[1] + 5), 0.40, (200, 120, 120), 1)
 
     if pending_px is not None and pending_py is not None:
         spx, spy = int(pending_px * scale), int(pending_py * scale)
@@ -190,6 +215,8 @@ def draw_tracks(
         if tr.geo:
             d = tr.geo.distance_cam_m if tr.geo.distance_cam_m > 0 else tr.geo.distance_m
             parts.append(f"D:{d:.2f}m")
+            if tr.geo.zone:
+                parts.append(f"[{tr.geo.zone}]")
 
         txt = "  ".join(parts)
         tx, ty = fx + 10, max(18, fy - 8)
@@ -367,6 +394,11 @@ def draw_panel(
         mode_btn("mode_xy",     CAL_MODE_XY)
         mode_btn("mode_laser",  CAL_MODE_LASER)
         mode_btn("mode_hybrid", CAL_MODE_HYBRID)
+        if _check_y(LINE):
+            desc = _MODE_DESC.get(cal_mode, "")
+            cv2.putText(canvas, desc, (x, y), _FONT, 0.33,
+                        _MODE_COLORS.get(cal_mode, (160, 160, 170)), 1, cv2.LINE_AA)
+            y += LINE + 2
 
     # ── POINT PICK ACTIVE: big banner ─────────────────────────────────────────
     if pick_active and _check_y(36):
@@ -413,6 +445,54 @@ def draw_panel(
             act_label = "Activity: ON  [toggle]" if activity_enabled else "Activity: OFF [toggle]"
             act_col = (40, 130, 40) if activity_enabled else (80, 80, 90)
             button("toggle_activity", act_label, active=activity_enabled, col=act_col)
+
+    # ── ZONES ─────────────────────────────────────────────────────────────────
+    zones        = ui_state.get("zones", [])
+    zone_draw    = ui_state.get("zone_draw_active", False)
+    zone_nm_mode = ui_state.get("zone_name_mode", False)
+    zone_polygon = ui_state.get("zone_polygon_px", [])
+    zone_nm_buf  = ui_state.get("zone_name_buf", "")
+
+    if _check_y(18):
+        section("ZONES")
+
+    if zone_nm_mode and _check_y(FIELD_H + LINE):
+        bx1, by1, bx2, by2 = x, y, right, y + FIELD_H
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), (28, 52, 52), -1)
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), (0, 200, 200), 1)
+        cv2.putText(canvas, f"Name: {zone_nm_buf}_",
+                    (bx1 + 4, by1 + 16), _FONT, 0.40, (0, 230, 230), 1, cv2.LINE_AA)
+        y += FIELD_H + 3
+        if _check_y():
+            cv2.putText(canvas, "Enter=done  Esc=cancel",
+                        (x, y), _FONT, 0.32, (80, 160, 160), 1, cv2.LINE_AA)
+            y += LINE
+    elif zone_draw and _check_y(34):
+        n_z = len(zone_polygon)
+        bx1, by1, bx2, by2 = x, y, right, y + 34
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), (0, 48, 22), -1)
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), (0, 200, 100), 2)
+        cv2.putText(canvas, f">> CLICK IN VIDEO ({n_z} pts)",
+                    (bx1 + 4, by1 + 14), _FONT, 0.38, (0, 240, 120), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "Enter=finish  Esc=cancel",
+                    (bx1 + 4, by1 + 28), _FONT, 0.31, (0, 180, 90), 1, cv2.LINE_AA)
+        y += 38
+        if n_z >= 3:
+            button("zone_finish", f"Finish zone ({n_z} pts)", col=(0, 140, 60))
+    else:
+        button("zone_draw", "+ Draw zone")
+        if zones and _check_y(BTN_H):
+            button("zone_delete_last", "- Delete last zone")
+        for zone in zones[-4:]:
+            if not _check_y():
+                break
+            zname  = zone.get("name", "zone")
+            zcolor = tuple(int(c) for c in zone.get("color", [0, 200, 200]))
+            n_zpts = len(zone.get("polygon_px", []))
+            cv2.circle(canvas, (x + 6, y - 4), 5, zcolor, -1)
+            cv2.putText(canvas, f"  {zname} ({n_zpts} pts)",
+                        (x, y), _FONT, 0.36, (130, 195, 155), 1, cv2.LINE_AA)
+            y += LINE
 
     # ── POINTS LIST ───────────────────────────────────────────────────────────
     if cal_points and _check_y(16):

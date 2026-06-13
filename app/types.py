@@ -39,6 +39,7 @@ class GeoPoint:
     inside_room: bool
     inside_calibration_zone: bool
     distance_cam_m: float = 0.0  # 3D distance from camera lens
+    zone: str = ""               # zone name if inside a defined zone
 
 
 @dataclass(slots=True)

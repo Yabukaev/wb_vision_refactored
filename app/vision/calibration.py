@@ -66,6 +66,7 @@ class CalibrationData:
     camera_floor_x_m: float = 0.0     # camera floor-projection X offset from AIM (0 = above AIM)
     camera_floor_y_m: float = 0.0     # camera floor-projection Y offset from AIM
     cal_points: list | None = None     # list of dicts {px,py,x_m,y_m,dist_m,angle_deg}
+    zones: list | None = None          # list of dicts {name, polygon_px, color}
 
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -77,6 +78,8 @@ class CalibrationData:
             self.world_points = []
         if self.cal_points is None:
             self.cal_points = []
+        if self.zones is None:
+            self.zones = []
 
 
 class CalibrationManager:
@@ -138,6 +141,7 @@ class CalibrationManager:
 
             data.cal_mode = str(raw.get("cal_mode", data.cal_mode))
             data.cal_points = list(raw.get("cal_points", []))
+            data.zones = list(raw.get("zones", []))
             data.created_at = float(raw.get("created_at", data.created_at))
             data.updated_at = float(raw.get("updated_at", raw.get("created_at", data.updated_at)))
 
@@ -217,6 +221,33 @@ class CalibrationManager:
             self._invalidate_locked()
             self.save()
 
+    # ── zone management ──────────────────────────────────────────────────────
+
+    def add_zone(self, name: str, polygon_px: list, color: list | None = None) -> None:
+        _color = color or [0, 200, 200]
+        with self._lock:
+            zones = list(self.data.zones or [])
+            zones.append({
+                "name": name,
+                "polygon_px": [[int(p[0]), int(p[1])] for p in polygon_px],
+                "color": _color,
+            })
+            self.data.zones = zones
+            self.save()
+
+    def delete_zone(self, index: int) -> None:
+        with self._lock:
+            zones = list(self.data.zones or [])
+            if 0 <= index < len(zones):
+                zones.pop(index)
+                self.data.zones = zones
+                self.save()
+
+    def clear_zones(self) -> None:
+        with self._lock:
+            self.data.zones = []
+            self.save()
+
     # Legacy floor-points API (kept for fallback)
 
     def clear_floor_points(self) -> None:
@@ -255,6 +286,7 @@ class CalibrationManager:
             width = float(self.data.room_width_m)
             depth = float(self.data.room_depth_m)
             fp = list(self.data.floor_points or [])
+            zones_data = list(self.data.zones or [])
 
         if H is None:
             return None
@@ -297,6 +329,15 @@ class CalibrationManager:
                 if len(fp) >= 3 else False
             )
 
+        zone_name = ""
+        for zone in zones_data:
+            poly_px = zone.get("polygon_px", [])
+            if len(poly_px) >= 3:
+                poly_arr = np.array(poly_px, dtype=np.int32)
+                if cv2.pointPolygonTest(poly_arr, (float(px), float(py)), False) >= 0:
+                    zone_name = zone.get("name", "")
+                    break
+
         return GeoPoint(
             x_m=x_m,
             y_m=y_m,
@@ -304,6 +345,7 @@ class CalibrationManager:
             inside_room=inside_room,
             inside_calibration_zone=inside_cal,
             distance_cam_m=dist_cam,
+            zone=zone_name,
         )
 
     # ── internal ──────────────────────────────────────────────────────────────

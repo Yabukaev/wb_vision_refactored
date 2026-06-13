@@ -16,6 +16,15 @@ from app.vision.calibration import (
 )
 from app.vision.overlay import FIELD_ORDER, draw_calibration, draw_panel, draw_tracks
 
+_ZONE_COLORS = [
+    [0, 200, 200],
+    [200, 120, 0],
+    [180, 0, 180],
+    [200, 200, 0],
+    [0, 180, 100],
+    [0, 100, 200],
+]
+
 
 class UIWorker:
     """OpenCV UI loop. On Windows this must run in the main thread."""
@@ -46,13 +55,19 @@ class UIWorker:
         self.aim_mode = False
 
         # Calibration point pick / entry state machine
-        self.point_pick_active = False   # waiting for user to click on video
+        self.point_pick_active = False
         self.pending_px: Optional[int] = None
         self.pending_py: Optional[int] = None
-        self.point_entry_fields: list[tuple[str, str]] = []  # (field_key, label)
+        self.point_entry_fields: list[tuple[str, str]] = []
         self.point_entry_cursor: int = 0
         self.point_entry_buf: str = ""
         self.point_entry_values: dict[str, float] = {}
+
+        # Zone drawing state
+        self.zone_draw_active = False
+        self.zone_polygon_px: list[list[int]] = []
+        self.zone_name_mode = False
+        self.zone_name_buf = ""
 
         # Panel hit-testing dicts (rebuilt each frame)
         self.buttons: dict[str, tuple[int, int, int, int]] = {}
@@ -119,7 +134,8 @@ class UIWorker:
             ]
             y = 54
             for line in lines:
-                cv2.putText(canvas, line, (36, y), cv2.FONT_HERSHEY_SIMPLEX, 0.68, (235, 235, 235), 1, cv2.LINE_AA)
+                cv2.putText(canvas, line, (36, y), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.68, (235, 235, 235), 1, cv2.LINE_AA)
                 y += 32
             self._waiting_canvas = canvas
             self._waiting_canvas_size = (ww, wh)
@@ -156,6 +172,7 @@ class UIWorker:
                 resized, cal, scale=self.scale,
                 pending_px=self.pending_px,
                 pending_py=self.pending_py,
+                zone_polygon_px=self.zone_polygon_px if self.zone_draw_active else None,
             )
 
         canvas[self.off_y:self.off_y + self.draw_h, self.off_x:self.off_x + self.draw_w] = resized
@@ -169,7 +186,6 @@ class UIWorker:
         self.buttons = {}
         self.fields = {}
 
-        # Build field values for numeric panel
         field_values: dict[str, str] = {}
         for key, _ in FIELD_ORDER:
             if self.editing_key == key:
@@ -178,8 +194,10 @@ class UIWorker:
                 value = getattr(cal, key, "")
                 field_values[key] = f"{value:g}" if isinstance(value, float) else str(value)
 
-        # Hybrid distance validation
-        hybrid_errors = self.calibration.validate_hybrid_distances() if cal.cal_mode == CAL_MODE_HYBRID else []
+        hybrid_errors = (
+            self.calibration.validate_hybrid_distances()
+            if cal.cal_mode == CAL_MODE_HYBRID else []
+        )
 
         ui_state = {
             "cal_mode": cal.cal_mode,
@@ -194,6 +212,11 @@ class UIWorker:
             "hybrid_errors": hybrid_errors,
             "activity_enabled": self.activity.is_enabled if self.activity else False,
             "activity_available": self.activity is not None,
+            "zones": cal.zones or [],
+            "zone_draw_active": self.zone_draw_active,
+            "zone_polygon_px": self.zone_polygon_px,
+            "zone_name_mode": self.zone_name_mode,
+            "zone_name_buf": self.zone_name_buf,
         }
 
         draw_panel(
@@ -217,13 +240,39 @@ class UIWorker:
 
         low = key & 0xFF
 
-        # Point entry mode: collect values field by field
+        # Zone name entry (highest priority)
+        if self.zone_name_mode:
+            if low in (13, 10):
+                name = self.zone_name_buf.strip() or "zone"
+                cal = self.calibration.snapshot()
+                n = len(cal.zones or [])
+                color = _ZONE_COLORS[n % len(_ZONE_COLORS)]
+                self.calibration.add_zone(name, [[p[0], p[1]] for p in self.zone_polygon_px], color)
+                self.zone_polygon_px = []
+                self.zone_name_mode = False
+                self.zone_name_buf = ""
+                self.zone_draw_active = False
+                print(f"Zone '{name}' saved")
+            elif low == 27:
+                self.zone_name_mode = False
+                self.zone_name_buf = ""
+                self.zone_polygon_px = []
+                self.zone_draw_active = False
+                print("Zone cancelled")
+            elif low in (8, 127):
+                self.zone_name_buf = self.zone_name_buf[:-1]
+            elif 32 <= low <= 126:
+                if len(self.zone_name_buf) < 20:
+                    self.zone_name_buf += chr(low)
+            return False
+
+        # Cal point entry mode
         if self.pending_px is not None:
-            if low in (13, 10):   # Enter — commit current field
+            if low in (13, 10):
                 self._point_entry_advance()
-            elif low == 27:       # Esc — cancel
+            elif low == 27:
                 self._point_entry_cancel()
-            elif low in (8, 127): # Backspace
+            elif low in (8, 127):
                 self.point_entry_buf = self.point_entry_buf[:-1]
             elif 0 <= low <= 255:
                 ch = chr(low)
@@ -244,6 +293,21 @@ class UIWorker:
                 ch = chr(low)
                 if ch in "0123456789.-":
                     self.edit_buffer += ch
+            return False
+
+        # Zone draw mode (intercepts Enter/Esc)
+        if self.zone_draw_active:
+            if low == 27:
+                self.zone_draw_active = False
+                self.zone_polygon_px = []
+                print("Zone cancelled")
+                return False
+            if low in (13, 10):
+                if len(self.zone_polygon_px) >= 3:
+                    self.zone_draw_active = False
+                    self.zone_name_mode = True
+                    print("Enter zone name on keyboard")
+                return False
             return False
 
         # Normal commands
@@ -294,7 +358,7 @@ class UIWorker:
             x1, y1, x2, y2 = rect
             if x1 <= x <= x2 and y1 <= y <= y2:
                 if key.startswith("pe_"):
-                    return  # point entry fields are keyboard-only
+                    return
                 cal = self.calibration.snapshot()
                 self.editing_key = key
                 self.edit_buffer = f"{getattr(cal, key, 0.0):g}"
@@ -309,7 +373,11 @@ class UIWorker:
         if self.aim_mode:
             self.calibration.set_aim(fx, fy)
             self.aim_mode = False
-            print(f"AIM установлен: ({fx}, {fy})")
+            print(f"AIM set: ({fx}, {fy})")
+
+        elif self.zone_draw_active and not self.zone_name_mode:
+            self.zone_polygon_px.append([fx, fy])
+            print(f"Zone point {len(self.zone_polygon_px)}: ({fx}, {fy})")
 
         elif self.point_pick_active:
             self.pending_px = fx
@@ -321,39 +389,39 @@ class UIWorker:
             self.point_entry_buf = ""
             self.point_entry_values = {}
             n = len(cal.cal_points or []) + 1
-            print(f"Точка P{n} выбрана: пиксель ({fx}, {fy}). Введите значения.")
+            print(f"Point P{n} selected: pixel ({fx}, {fy}). Enter values.")
 
     def _handle_button(self, name: str) -> None:
         if name == "aim":
             self.aim_mode = True
             self.point_pick_active = False
-            print("Кликните точку AIM на полу")
+            print("Click AIM point on floor in video")
 
         elif name == "add_point":
             self._start_point_pick()
 
         elif name == "remove_point":
             self.calibration.remove_last_cal_point()
-            print("Последняя точка удалена")
+            print("Last point removed")
 
         elif name == "clear_points":
             self.calibration.clear_cal_points()
             self._point_entry_cancel()
-            print("Все точки очищены")
+            print("All points cleared")
 
         elif name == "save":
             self.calibration.save()
-            print("Калибровка сохранена")
+            print("Calibration saved")
 
         elif name == "mode_xy":
             self.calibration.set_cal_mode(CAL_MODE_XY)
             self._point_entry_cancel()
-            print("Режим: XY-координаты")
+            print("Mode: XY coords")
 
         elif name == "mode_laser":
             self.calibration.set_cal_mode(CAL_MODE_LASER)
             self._point_entry_cancel()
-            print("Режим: Лазер + угол")
+            print("Mode: Laser+angle")
 
         elif name == "mode_hybrid":
             self.calibration.set_cal_mode(CAL_MODE_HYBRID)
@@ -363,7 +431,28 @@ class UIWorker:
         elif name == "toggle_activity":
             if self.activity is not None:
                 enabled = self.activity.toggle_enabled()
-                print(f"Activity classifier: {'ON' if enabled else 'OFF'}")
+                print(f"Activity: {'ON' if enabled else 'OFF'}")
+
+        elif name == "zone_draw":
+            self.zone_draw_active = True
+            self.zone_polygon_px = []
+            self.zone_name_mode = False
+            self.zone_name_buf = ""
+            print("Zone draw: click points in video. Enter to finish (need 3+).")
+
+        elif name == "zone_finish":
+            if len(self.zone_polygon_px) >= 3:
+                self.zone_draw_active = False
+                self.zone_name_mode = True
+                self.zone_name_buf = ""
+                print("Type zone name, then Enter")
+
+        elif name == "zone_delete_last":
+            cal = self.calibration.snapshot()
+            n = len(cal.zones or [])
+            if n > 0:
+                self.calibration.delete_zone(n - 1)
+                print("Last zone deleted")
 
     # ── point entry helpers ────────────────────────────────────────────────────
 
@@ -372,10 +461,9 @@ class UIWorker:
         self.aim_mode = False
         self.editing_key = None
         self._point_entry_cancel()
-        print("Кликните на полу в видео чтобы разместить точку")
+        print("Click floor in video to place point")
 
     def _point_entry_advance(self) -> None:
-        """Commit current field value and advance to next, or finalise the point."""
         if not self.point_entry_fields or self.pending_px is None:
             return
 
@@ -389,7 +477,6 @@ class UIWorker:
         self.point_entry_buf = ""
 
         if self.point_entry_cursor >= len(self.point_entry_fields):
-            # All fields collected — add the point
             vals = self.point_entry_values
             n = self.calibration.add_cal_point(
                 px=self.pending_px,
@@ -399,7 +486,7 @@ class UIWorker:
                 dist_m=vals.get("dist_m", 0.0),
                 angle_deg=vals.get("angle_deg", 0.0),
             )
-            print(f"Точка P{n} добавлена: px=({self.pending_px},{self.pending_py}) {vals}")
+            print(f"Point P{n} added: px=({self.pending_px},{self.pending_py}) vals={vals}")
             self.pending_px = None
             self.pending_py = None
             self.point_entry_fields = []
@@ -443,9 +530,9 @@ class UIWorker:
                 return
             value = float(self.edit_buffer.replace(",", "."))
             self.calibration.set_value(self.editing_key, value)
-            print(f"Сохранено {self.editing_key} = {value}")
+            print(f"Saved {self.editing_key} = {value}")
         except Exception as exc:
-            print(f"Неверное значение для {self.editing_key}: {exc}")
+            print(f"Invalid value for {self.editing_key}: {exc}")
         finally:
             self.editing_key = None
             self.edit_buffer = ""
