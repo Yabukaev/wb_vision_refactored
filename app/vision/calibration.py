@@ -48,6 +48,12 @@ class CalibrationData:
     lens_distortion_k1: float = 0.0
     lens_distortion_k2: float = 0.0
 
+    # Trapezoid calibration (preferred): 4 clicked image corners P1..P4,
+    # plus measured edge lengths and interior angles. P1 is the world origin.
+    quad_px: list | None = None         # [[x,y], ...] 4 image corners
+    trap_edges_m: list | None = None    # [AB, BC, CD, DA] metres
+    trap_angles_deg: list | None = None  # [A1, A2, A3, A4] interior angles
+
     zones: list | None = None           # list of dicts {name, polygon_px, color}
 
     created_at: float = 0.0
@@ -58,6 +64,12 @@ class CalibrationData:
             self.floor_points = []
         if self.world_points is None:
             self.world_points = []
+        if self.quad_px is None:
+            self.quad_px = []
+        if self.trap_edges_m is None:
+            self.trap_edges_m = [0.0, 0.0, 0.0, 0.0]
+        if self.trap_angles_deg is None:
+            self.trap_angles_deg = [90.0, 90.0, 90.0, 90.0]
         if self.zones is None:
             self.zones = []
 
@@ -119,6 +131,11 @@ class CalibrationManager:
                 if key in raw:
                     setattr(data, key, float(raw[key]))
 
+            data.quad_px = [list(map(float, p)) for p in raw.get("quad_px", [])]
+            if "trap_edges_m" in raw:
+                data.trap_edges_m = [float(v) for v in raw["trap_edges_m"]]
+            if "trap_angles_deg" in raw:
+                data.trap_angles_deg = [float(v) for v in raw["trap_angles_deg"]]
             data.zones = list(raw.get("zones", []))
             data.created_at = float(raw.get("created_at", data.created_at))
             data.updated_at = float(raw.get("updated_at", raw.get("created_at", data.updated_at)))
@@ -181,6 +198,60 @@ class CalibrationManager:
             self.save()
             return len(self.data.floor_points)
 
+    # ── trapezoid calibration ───────────────────────────────────────────────────
+
+    def set_quad_point(self, index: int, x: int, y: int) -> int:
+        """Set one of the 4 image corners P1..P4 (index 0..3). Cycles after 4."""
+        with self._lock:
+            q = list(self.data.quad_px or [])
+            if index == 0 and len(q) >= 4:
+                q = []
+            while len(q) <= index:
+                q.append([0.0, 0.0])
+            q[index] = [float(x), float(y)]
+            self.data.quad_px = q[:4]
+            self._invalidate_locked()
+            self.save()
+            return len(self.data.quad_px)
+
+    def clear_quad(self) -> None:
+        with self._lock:
+            self.data.quad_px = []
+            self._invalidate_locked()
+            self.save()
+
+    def set_trap_edge(self, index: int, value: float) -> None:
+        with self._lock:
+            e = list(self.data.trap_edges_m or [0.0, 0.0, 0.0, 0.0])
+            while len(e) < 4:
+                e.append(0.0)
+            if 0 <= index < 4:
+                e[index] = float(value)
+            self.data.trap_edges_m = e
+            self._invalidate_locked()
+            self.save()
+
+    def set_trap_angle(self, index: int, value: float) -> None:
+        with self._lock:
+            a = list(self.data.trap_angles_deg or [90.0, 90.0, 90.0, 90.0])
+            while len(a) < 4:
+                a.append(90.0)
+            if 0 <= index < 4:
+                a[index] = float(value)
+            self.data.trap_angles_deg = a
+            self._invalidate_locked()
+            self.save()
+
+    def trapezoid_closure_error(self) -> Optional[float]:
+        """Metres mismatch between the walked P4->P1 edge and the entered DA."""
+        with self._lock:
+            edges = list(self.data.trap_edges_m or [])
+            angles = list(self.data.trap_angles_deg or [90.0, 90.0, 90.0, 90.0])
+        if len(edges) != 4 or not all(e > 0 for e in edges[:3]):
+            return None
+        _pts, err = trapezoid_world_points(edges, angles)
+        return err
+
     # ── zone management ────────────────────────────────────────────────────────
 
     def add_zone(self, name: str, polygon_px: list, color: list | None = None) -> None:
@@ -220,6 +291,7 @@ class CalibrationManager:
             aim_px = float(self.data.aim_px)
             aim_py = float(self.data.aim_py)
             fp = list(self.data.floor_points or [])
+            quad = list(self.data.quad_px or [])
             zones_data = list(self.data.zones or [])
 
         if H is None:
@@ -241,11 +313,15 @@ class CalibrationManager:
         elev = cam_to_aim if cam_to_aim > 0 else cam_h
         dist_cam = math.sqrt(dist_floor * dist_floor + elev * elev)
 
-        inside_room = 0.0 <= x_m <= width and 0.0 <= y_m <= depth
+        # Inside-the-calibrated-area test uses the active image polygon (the
+        # trapezoid quad if defined, else the legacy rectangle). Points outside
+        # are still projected — the planar homography extrapolates exactly.
+        poly = quad if len(quad) == 4 else fp
         inside_cal = (
-            cv2.pointPolygonTest(np.array(fp, dtype=np.int32), (float(px), float(py)), False) >= 0
-            if len(fp) == 4 else False
+            cv2.pointPolygonTest(np.array(poly, dtype=np.int32), (float(px), float(py)), False) >= 0
+            if len(poly) == 4 else False
         )
+        inside_room = inside_cal if len(quad) == 4 else (0.0 <= x_m <= width and 0.0 <= y_m <= depth)
 
         zone_name = ""
         for zone in zones_data:
@@ -286,6 +362,19 @@ class CalibrationManager:
     def _homography_locked(self) -> Optional[np.ndarray]:
         if self._H is not None:
             return self._H
+
+        # Preferred: trapezoid (4 clicked corners + measured edges/angles).
+        quad = self.data.quad_px or []
+        edges = self.data.trap_edges_m or []
+        if len(quad) == 4 and len(edges) == 4 and all(e > 0 for e in edges[:3]):
+            world, _err = trapezoid_world_points(edges, self.data.trap_angles_deg or [90.0] * 4)
+            src = np.array(quad, dtype=np.float32)
+            dst = np.array(world, dtype=np.float32)
+            H, _ = cv2.findHomography(src, dst)
+            self._H = H
+            return H
+
+        # Fallback: legacy 4 floor points -> room rectangle.
         fp = self.data.floor_points or []
         if len(fp) != 4:
             return None
@@ -303,3 +392,34 @@ class CalibrationManager:
         with self._lock:
             self.data = self._load()
             self._invalidate_locked()
+
+
+def trapezoid_world_points(
+    edges_m: list, angles_deg: list,
+) -> tuple[list[tuple[float, float]], float]:
+    """Build the 4 floor-plane world coordinates of a trapezoid.
+
+    P1 is the origin (0, 0) and the first edge P1->P2 runs along +X. Then the
+    polygon is walked using the interior angles: at each vertex the heading turns
+    by (180 - interior_angle). Returns the 4 points [P1, P2, P3, P4] and the
+    closure error (how far the walked P4->P1 distance differs from the entered
+    DA length) — a quality check on the measurements.
+
+    edges_m  = [AB, BC, CD, DA]   (metres)
+    angles_deg = [A1, A2, A3, A4] (interior degrees; A2, A3 drive the walk)
+    """
+    ab, bc, cd, da = (float(e) for e in edges_m[:4])
+    _a1, a2, a3, _a4 = (float(a) for a in angles_deg[:4])
+
+    pts: list[tuple[float, float]] = [(0.0, 0.0)]
+    heading = 0.0
+    p = (0.0, 0.0)
+    for length, turn_at in ((ab, None), (bc, a2), (cd, a3)):
+        if turn_at is not None:
+            heading += 180.0 - turn_at
+        rad = math.radians(heading)
+        p = (p[0] + length * math.cos(rad), p[1] + length * math.sin(rad))
+        pts.append(p)
+
+    closure = math.hypot(pts[3][0] - pts[0][0], pts[3][1] - pts[0][1])
+    return pts, abs(closure - da)
