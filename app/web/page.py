@@ -82,6 +82,11 @@ INDEX_HTML = r"""<!doctype html>
     <div class="row"><label>Room W, m</label><input id="v_room_width_m" type="number" step="0.01"></div>
     <div class="row"><label>Room D, m</label><input id="v_room_depth_m" type="number" step="0.01"></div>
 
+    <h2>Models (hot-swap)</h2>
+    <div class="row"><label>Pose</label><select id="m_pose" style="flex:1"></select></div>
+    <div class="row"><label>Object</label><select id="m_object" style="flex:1"></select></div>
+    <div class="muted" id="m_note">swap applies on the next inference frame</div>
+
     <h2>Runtime tuning</h2>
     <div id="tuning"></div>
 
@@ -230,7 +235,27 @@ async function refresh() {
   } catch(e) {}
 }
 window.delZone = async (i) => { await post('/api/zone/delete', {index:i}); };
+
+function base(p){ return p ? p.split(/[\\\/]/).pop() : '(none)'; }
+function fillModels(sel, list, current){
+  if (document.activeElement === sel) return;
+  sel.innerHTML = (list||[]).map(p => '<option value="'+p+'"'+(p===current?' selected':'')+'>'+base(p)+'</option>').join('');
+}
+let modelsBound = false;
+async function refreshModels(){
+  try {
+    const m = await (await fetch('/api/models')).json();
+    fillModels(document.getElementById('m_pose'), m.available.pose, m.current.pose);
+    fillModels(document.getElementById('m_object'), m.available.object, m.current.object);
+    if (!modelsBound){
+      document.getElementById('m_pose').addEventListener('change', e => post('/api/model', {kind:'pose', path:e.target.value}));
+      document.getElementById('m_object').addEventListener('change', e => post('/api/model', {kind:'object', path:e.target.value}));
+      modelsBound = true;
+    }
+  } catch(e) {}
+}
 setInterval(refresh, 1000); refresh();
+setInterval(refreshModels, 3000); refreshModels();
 </script>
 </body>
 </html>

@@ -239,6 +239,20 @@ class ActivityClassifier:
     def is_enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def object_model_path(self) -> str:
+        return self._cfg.det_model_path
+
+    def set_object_model(self, path: str) -> None:
+        """Swap the object-detection model (called from the inference thread)."""
+        self._cfg.det_model_path = str(path)
+        self._detector = ObjectDetector(self._cfg)
+        if self._enabled:
+            self._detector.load()
+        else:
+            self._load_needed = True
+        log.info("object model -> %s", path)
+
     # ── inference ─────────────────────────────────────────────────────────────
 
     def classify(self, image: np.ndarray, tracks: list[TrackSnapshot], now: float) -> dict[int, str]:

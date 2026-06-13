@@ -9,8 +9,11 @@ import numpy as np
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from pathlib import Path
+
 from app.config import TrackerSection, VisionSection, WebSection
 from app.core.latest_value import LatestValue
+from app.model_registry import discover_models, with_current
 from app.runtime_tuning import apply_tuning, get_tuning, tuning_specs
 from app.types import FramePacket, VisionPacket
 from app.vision.calibration import CalibrationManager
@@ -25,6 +28,7 @@ def build_app(
     web_cfg: WebSection,
     vision_cfg: Optional[VisionSection] = None,
     tracker_cfg: Optional[TrackerSection] = None,
+    inference: Optional[object] = None,
 ) -> FastAPI:
     app = FastAPI(title="WB Vision")
     vision_cfg = vision_cfg if vision_cfg is not None else VisionSection()
@@ -92,6 +96,29 @@ def build_app(
         except KeyError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         return JSONResponse({"ok": True, "value": new_val})
+
+    # ── model hot-swap ───────────────────────────────────────────────────────
+    @app.get("/api/models")
+    def models() -> dict:
+        found = discover_models([Path.cwd(), Path.cwd() / "models"])
+        cur = inference.current_models() if inference is not None else {
+            "pose": vision_cfg.model_path, "object": None,
+        }
+        return {"available": with_current(found, cur.get("pose"), cur.get("object")), "current": cur}
+
+    @app.post("/api/model")
+    def set_model(body: dict) -> JSONResponse:
+        kind = str(body.get("kind"))
+        path = str(body.get("path", ""))
+        if not path or kind not in ("pose", "object"):
+            return JSONResponse({"ok": False, "error": "kind must be pose|object with a path"}, status_code=400)
+        if inference is None:
+            return JSONResponse({"ok": False, "error": "inference not available"}, status_code=503)
+        if kind == "pose":
+            inference.request_pose_model(path)
+        else:
+            inference.request_object_model(path)
+        return JSONResponse({"ok": True})
 
     # ── calibration mutations ────────────────────────────────────────────────
     @app.post("/api/aim")
@@ -203,6 +230,7 @@ class WebServer(threading.Thread):
         stop_event: threading.Event,
         vision_cfg: Optional[VisionSection] = None,
         tracker_cfg: Optional[TrackerSection] = None,
+        inference: Optional[object] = None,
     ) -> None:
         super().__init__(name="web-server", daemon=True)
         self.cfg = web_cfg
@@ -212,6 +240,7 @@ class WebServer(threading.Thread):
         self.stop_event = stop_event
         self.vision_cfg = vision_cfg
         self.tracker_cfg = tracker_cfg
+        self.inference = inference
         self._server: Optional[object] = None
 
     def run(self) -> None:
@@ -223,7 +252,7 @@ class WebServer(threading.Thread):
         try:
             app = build_app(
                 self.frames, self.results, self.calibration, self.cfg,
-                self.vision_cfg, self.tracker_cfg,
+                self.vision_cfg, self.tracker_cfg, self.inference,
             )
             config = uvicorn.Config(
                 app, host=self.cfg.host, port=int(self.cfg.port),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from typing import Optional
@@ -58,7 +59,42 @@ class InferenceWorker(threading.Thread):
         self._ram = 0.0
         self._prev_done_ts = time.time()
         self._published_track_ids: set[int] = set()
+        self._model_lock = threading.Lock()
+        self._pending_pose_model: Optional[str] = None
+        self._pending_object_model: Optional[str] = None
         psutil.cpu_percent(interval=None)  # B-02: primer — first real call returns 0 otherwise
+
+    # ── model hot-swap (web thread requests, inference thread applies) ──────────
+
+    def request_pose_model(self, path: str) -> None:
+        with self._model_lock:
+            self._pending_pose_model = str(path)
+
+    def request_object_model(self, path: str) -> None:
+        with self._model_lock:
+            self._pending_object_model = str(path)
+
+    def current_models(self) -> dict:
+        obj = None
+        if self.activity_classifier is not None:
+            obj = self.activity_classifier.object_model_path
+        return {"pose": self.vision_cfg.model_path, "object": obj}
+
+    def _apply_pending_models(self) -> None:
+        with self._model_lock:
+            pose = self._pending_pose_model
+            obj = self._pending_object_model
+            self._pending_pose_model = None
+            self._pending_object_model = None
+        if pose and pose != self.vision_cfg.model_path:
+            try:
+                self.vision_cfg.model_path = pose
+                self.detector = YoloPoseDetector(self.vision_cfg)
+                logging.getLogger("inference").info("pose model -> %s", pose)
+            except Exception:
+                logging.getLogger("inference").exception("pose model swap failed")
+        if obj and self.activity_classifier is not None:
+            self.activity_classifier.set_object_model(obj)
 
     def run(self) -> None:
         self.detector = YoloPoseDetector(self.vision_cfg)
@@ -80,6 +116,7 @@ class InferenceWorker(threading.Thread):
                 continue
 
             self._last_infer_ts = now
+            self._apply_pending_models()  # hot-swap requested via web, if any
             t0 = time.perf_counter()
             detections = self.detector.predict(packet.image)
             detections = suppress_duplicates(

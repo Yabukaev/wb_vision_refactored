@@ -113,6 +113,7 @@ def main() -> int:
         web_server = WebServer(
             settings.web, frames, results, calibration, stop_event,
             vision_cfg=settings.vision, tracker_cfg=settings.tracker,
+            inference=inference_worker,
         )
         log.info("WEB: http://%s:%s", settings.web.host, settings.web.port)
 

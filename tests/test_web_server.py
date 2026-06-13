@@ -92,6 +92,57 @@ def test_tuning_clamps_and_rejects(client):
     assert bad.status_code == 400
 
 
+class _InferenceStub:
+    def __init__(self):
+        self.pose_req = None
+        self.object_req = None
+
+    def request_pose_model(self, p):
+        self.pose_req = p
+
+    def request_object_model(self, p):
+        self.object_req = p
+
+    def current_models(self):
+        return {"pose": "yolo11n-pose.pt", "object": "yolo11n.pt"}
+
+
+def _client_with_inference(tmp_path):
+    cal_file = (tmp_path / "calibration.json").as_posix()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(CONFIG_YAML.format(cal_file=cal_file), encoding="utf-8")
+    calibration = CalibrationManager(ConfigManager(cfg))
+    stub = _InferenceStub()
+    app = build_app(LatestValue(), LatestValue(), calibration, WebSection(),
+                    VisionSection(), TrackerSection(), stub)
+    c = TestClient(app)
+    c.stub = stub  # type: ignore[attr-defined]
+    return c
+
+
+def test_models_endpoint(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = _client_with_inference(tmp_path)
+    data = c.get("/api/models").json()
+    assert "available" in data and "current" in data
+    assert data["current"]["pose"] == "yolo11n-pose.pt"
+
+
+def test_set_model_requests_swap(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = _client_with_inference(tmp_path)
+    assert c.post("/api/model", json={"kind": "pose", "path": "yolo11s-pose.pt"}).json()["ok"]
+    assert c.stub.pose_req == "yolo11s-pose.pt"
+    c.post("/api/model", json={"kind": "object", "path": "yolo11s.pt"})
+    assert c.stub.object_req == "yolo11s.pt"
+
+
+def test_set_model_rejects_bad_kind(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = _client_with_inference(tmp_path)
+    assert c.post("/api/model", json={"kind": "bogus", "path": "x.pt"}).status_code == 400
+
+
 def test_zone_add_and_delete(client):
     client.post("/api/zone/add", json={"name": "shower", "polygon_px": [[1, 1], [9, 1], [5, 9]]})
     zones = client.get("/api/state").json()["calibration"]["zones"]
