@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import threading
 import time
@@ -24,7 +24,7 @@ class LatestValue(Generic[T]):
         with self._cond:
             self._value = value
             self._seq += 1
-            self._cond.notify_all()
+            self._cond.notify()  # P-05: only one consumer waits; notify() is sufficient
             return self._seq
 
     def get(self) -> tuple[Optional[T], int]:
@@ -47,5 +47,4 @@ class LatestValue(Generic[T]):
     def close(self) -> None:
         with self._cond:
             self._closed = True
-            self._cond.notify_all()
-
+            self._cond.notify_all()  # wake all potential waiters on close

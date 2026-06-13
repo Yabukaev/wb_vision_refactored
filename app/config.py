@@ -1,15 +1,17 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::([^}]*))?\}")
+log = logging.getLogger("config")
 
 
 def _load_dotenv(path: Path) -> None:
@@ -41,6 +43,27 @@ def _expand_env(value: Any) -> Any:
     # Substituted values stay strings: coercing here corrupts credentials
     # like "007" or all-digit passwords. Consumers cast explicitly.
     return _ENV_PATTERN.sub(repl, value)
+
+
+def _cast(value: Any, field_default: Any) -> Any:
+    """B-11: cast env-substituted strings to the expected primitive type."""
+    if not isinstance(value, str):
+        return value
+    if field_default is MISSING or not isinstance(field_default, (bool, int, float)):
+        return value
+    if isinstance(field_default, bool):
+        return value.lower() in ("1", "true", "yes", "on")
+    if isinstance(field_default, int):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if isinstance(field_default, float):
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    return value
 
 
 @dataclass(slots=True)
@@ -148,8 +171,13 @@ def _section(cls: type, data: dict[str, Any]) -> Any:
         data = {}
     if not isinstance(data, dict):
         raise TypeError(f"Config section {cls.__name__} must be a mapping/dict, got {type(data).__name__}: {data!r}")
-    allowed = set(cls.__dataclass_fields__.keys())  # type: ignore[attr-defined]
-    return cls(**{k: v for k, v in data.items() if k in allowed})
+    fields = cls.__dataclass_fields__  # type: ignore[attr-defined]
+    # B-12: warn about unknown keys so typos are caught immediately
+    unknown = [k for k in data if k not in fields]
+    if unknown:
+        log.warning("Unknown config keys in %s (ignored): %s", cls.__name__, unknown)
+    # B-11: cast env-substituted strings to the declared primitive type
+    return cls(**{k: _cast(v, fields[k].default) for k, v in data.items() if k in fields})
 
 
 class ConfigManager:
