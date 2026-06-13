@@ -176,6 +176,7 @@ class WebSection:
     port: int = 8000
     stream_max_width: int = 1280   # MJPEG downscale cap for bandwidth
     stream_fps: float = 15.0
+    open_browser: bool = True      # open the control UI in the default browser on start
 
 
 @dataclass(slots=True)

@@ -122,6 +122,10 @@ def main() -> int:
     inference_worker.start()
     if web_server is not None:
         web_server.start()
+        if settings.web.open_browser:
+            host = "127.0.0.1" if settings.web.host in ("0.0.0.0", "") else settings.web.host
+            url = f"http://{host}:{settings.web.port}"
+            threading.Timer(1.5, lambda: __import__("webbrowser").open(url)).start()
 
     try:
         if args.debug and settings.ui.enabled:

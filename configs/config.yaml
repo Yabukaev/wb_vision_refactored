@@ -83,3 +83,4 @@ web:
   port: 8000
   stream_max_width: 1280
   stream_fps: 15.0
+  open_browser: true
