@@ -59,6 +59,15 @@ calibration:
   lens_distortion_k1: 0.0
   lens_distortion_k2: 0.0
 
+activity:
+  enabled: false
+  det_model_path: yolo11n.pt
+  det_conf: 0.30
+  det_fps: 2.0
+  clip_enabled: false
+  clip_model: openai/clip-vit-base-patch32
+  clip_fps: 0.5
+
 ui:
   enabled: true
   window_width: 1600

@@ -39,7 +39,12 @@ class _Track:
     last_seen: float
     hits: int = 1
     history: deque[tuple[float, float]] = field(default_factory=deque)  # B-16
+    history_ts: deque[float] = field(default_factory=deque)
     state_history: deque[str] = field(default_factory=lambda: deque(maxlen=7))
+    non_lying_ts: float = 0.0
+    fallen_until_ts: float = 0.0
+    last_moved_ts: float = 0.0
+    motion: str = "stationary"
 
 
 class StableTracker:
@@ -109,13 +114,28 @@ class StableTracker:
                     history=[(int(p[0]), int(p[1])) for p in tr.history],
                     keypoints=tr.keypoints,
                     geo=geo,
+                    motion=tr.motion,
                 )
             )
         return out
 
+    def _foot_velocity(self, tr: _Track, now: float) -> float:
+        if len(tr.history) < 2 or len(tr.history_ts) < 2:
+            return 0.0
+        foot_now = tr.history[-1]
+        ts_now = tr.history_ts[-1]
+        for i in range(len(tr.history) - 2, -1, -1):
+            dt = ts_now - tr.history_ts[i]
+            if dt >= 1.5 or i == 0:
+                if dt < 0.1:
+                    return 0.0
+                return math.hypot(foot_now[0] - tr.history[i][0], foot_now[1] - tr.history[i][1]) / dt
+        return 0.0
+
     def _create_track(self, det: Detection, now: float) -> None:
         tid = self._next_id
         self._next_id += 1
+        max_hist = int(self.cfg.max_history)
         tr = _Track(
             track_id=tid,
             box=(float(det.box[0]), float(det.box[1]), float(det.box[2]), float(det.box[3])),
@@ -127,13 +147,17 @@ class StableTracker:
             first_seen=now,
             last_seen=now,
         )
-        tr.history = deque([(float(det.foot[0]), float(det.foot[1]))], maxlen=int(self.cfg.max_history))
+        tr.history = deque([(float(det.foot[0]), float(det.foot[1]))], maxlen=max_hist)
+        tr.history_ts = deque([now], maxlen=max_hist)
         tr.state_history.append(det.state)
         self._tracks[tid] = tr
 
     def _update_track(self, tid: int, det: Detection, now: float) -> None:
         tr = self._tracks[tid]
         alpha = float(self.cfg.smoothing)
+        cfg = self.cfg
+        prev_state = tr.state
+
         tr.box = _smooth_box(tr.box, (float(det.box[0]), float(det.box[1]), float(det.box[2]), float(det.box[3])), alpha)
         tr.foot = _smooth_point(tr.foot, (float(det.foot[0]), float(det.foot[1])), alpha)
         tr.center = _smooth_point(tr.center, (float(det.center[0]), float(det.center[1])), alpha)
@@ -142,8 +166,32 @@ class StableTracker:
         tr.last_seen = now
         tr.hits += 1
         tr.history.append(tr.foot)
+        tr.history_ts.append(now)
         tr.state_history.append(det.state)
         tr.state = Counter(tr.state_history).most_common(1)[0][0]
+
+        if tr.state != "lying":
+            tr.non_lying_ts = now
+
+        velocity = self._foot_velocity(tr, now)
+        if velocity > float(cfg.still_px_s):
+            tr.last_moved_ts = now
+
+        if tr.state == "lying" and prev_state != "lying":
+            if tr.non_lying_ts > 0 and (now - tr.non_lying_ts) < float(cfg.fallen_window_sec):
+                tr.fallen_until_ts = now + float(cfg.fallen_persist_sec)
+
+        if tr.fallen_until_ts > now:
+            tr.motion = "fallen"
+        elif tr.state == "lying":
+            if velocity < float(cfg.still_px_s) and (now - tr.last_moved_ts) > float(cfg.sleep_still_sec):
+                tr.motion = "sleeping"
+            else:
+                tr.motion = "lying"
+        elif tr.state == "standing" and velocity > float(cfg.walking_px_s):
+            tr.motion = "walking"
+        else:
+            tr.motion = "stationary"
 
     def _drop_expired(self, now: float) -> None:
         keep_sec = float(self.cfg.keep_sec)

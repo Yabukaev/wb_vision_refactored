@@ -137,10 +137,10 @@ class UIWorker:
         interp = cv2.INTER_AREA if self.scale < 1.0 else cv2.INTER_LINEAR
         resized = cv2.resize(frame, (self.draw_w, self.draw_h), interpolation=interp)
 
-        if result is not None:
+        if packet is not None:
             draw_tracks(
                 resized,
-                result.tracks,
+                packet.tracks,
                 scale=self.scale,
                 show_pose=self.ui_cfg.show_pose,
                 show_tracks=self.ui_cfg.show_tracks,

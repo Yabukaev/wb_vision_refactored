@@ -7,10 +7,13 @@ from typing import Optional
 
 import psutil
 
-from app.config import CameraSection, MqttSection, VisionSection
+from dataclasses import replace
+
+from app.config import ActivitySection, CameraSection, MqttSection, VisionSection
 from app.core.latest_value import LatestValue
 from app.mqtt.mqtt_worker import MqttWorker
 from app.types import FramePacket, TrackSnapshot, VisionPacket
+from app.vision.activity_classifier import ActivityClassifier
 from app.vision.calibration import CalibrationManager
 from app.vision.detector import YoloPoseDetector, suppress_duplicates
 from app.vision.tracker import StableTracker
@@ -29,6 +32,7 @@ class InferenceWorker(threading.Thread):
         mqtt_worker: Optional[MqttWorker],
         stop_event: threading.Event,
         reader_fps_getter=None,
+        activity_cfg: Optional[ActivitySection] = None,
     ) -> None:
         super().__init__(name="inference-worker", daemon=True)
         self.vision_cfg = vision_cfg
@@ -41,6 +45,9 @@ class InferenceWorker(threading.Thread):
         self.mqtt = mqtt_worker
         self.stop_event = stop_event
         self.reader_fps_getter = reader_fps_getter
+        self.activity_classifier: Optional[ActivityClassifier] = (
+            ActivityClassifier(activity_cfg) if activity_cfg is not None else None
+        )
         self.detector: Optional[YoloPoseDetector] = None
         self._inference_fps = 0.0
         self._last_infer_ts = 0.0
@@ -55,6 +62,8 @@ class InferenceWorker(threading.Thread):
 
     def run(self) -> None:
         self.detector = YoloPoseDetector(self.vision_cfg)
+        if self.activity_classifier is not None:
+            self.activity_classifier.start()
         self._mqtt(f"{self.camera_cfg.id}/status", "online", retain=True)
         last_seq = 0
         min_interval = 1.0 / max(0.1, float(self.vision_cfg.inference_fps))
@@ -85,6 +94,9 @@ class InferenceWorker(threading.Thread):
             self._inference_fps = inst_fps if self._inference_fps <= 0 else 0.85 * self._inference_fps + 0.15 * inst_fps
 
             tracks = self.tracker.update(detections, now=now, geo_fn=self.calibration.pixel_to_floor)
+            if self.activity_classifier is not None:
+                activities = self.activity_classifier.classify(packet.image, tracks, now)
+                tracks = [replace(tr, activity=activities.get(tr.track_id, "")) for tr in tracks]
             self._update_system_stats(now)  # P-04: only calls psutil every 2s
             reader_fps = float(self.reader_fps_getter() or 0.0) if self.reader_fps_getter else 0.0
 
@@ -150,6 +162,7 @@ class InferenceWorker(threading.Thread):
         payload: dict = {
             "id": tr.track_id,
             "state": tr.state,
+            "motion": tr.motion,
             "confidence": round(tr.conf, 3),
             "foot_px": {"x": fx, "y": fy},
             "frame": {"width": fw, "height": fh},
@@ -157,6 +170,8 @@ class InferenceWorker(threading.Thread):
             "age_sec": round(tr.age_sec, 2),
             "ts": now,
         }
+        if tr.activity:
+            payload["activity"] = tr.activity
         if tr.geo:
             payload["geo"] = {
                 "x_m": round(tr.geo.x_m, 3),
@@ -169,8 +184,11 @@ class InferenceWorker(threading.Thread):
         # P-07: serialize JSON once and reuse
         payload_json = json.dumps(payload, ensure_ascii=False)
         base = f"{cid}/person/{tr.track_id}"
-        self._mqtt(f"{base}/json", payload_json)   # full payload for most consumers
-        self._mqtt(f"{base}/state", tr.state)       # simple string for HA triggers
+        self._mqtt(f"{base}/json", payload_json)
+        self._mqtt(f"{base}/state", tr.state)
+        self._mqtt(f"{base}/motion", tr.motion)
+        if tr.activity:
+            self._mqtt(f"{base}/activity", tr.activity)
 
         # P-03: expose only the most-used flat geo fields; everything else is in /json
         if tr.geo:

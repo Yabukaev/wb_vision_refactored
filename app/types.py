@@ -54,6 +54,8 @@ class TrackSnapshot:
     history: list[tuple[int, int]] = field(default_factory=list)
     keypoints: Optional[np.ndarray] = None
     geo: Optional[GeoPoint] = None
+    motion: str = "stationary"
+    activity: str = ""
 
 
 @dataclass(slots=True)

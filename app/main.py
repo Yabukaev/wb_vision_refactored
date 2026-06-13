@@ -39,13 +39,15 @@ def setup_logging() -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="WB Vision refactored RTSP/YOLO/MQTT app")
     parser.add_argument("--config", default="configs/config.yaml", help="Path to YAML config")
-    parser.add_argument("--headless", action="store_true", help="Run without OpenCV UI")
+    parser.add_argument("--debug", action="store_true", help="Enable UI window and verbose logging")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     setup_logging()
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
     try:
         config = ConfigManager(args.config)
     except (FileNotFoundError, ValueError) as exc:
@@ -96,20 +98,21 @@ def main() -> int:
         mqtt_worker=mqtt_worker,
         stop_event=stop_event,
         reader_fps_getter=lambda: rtsp_reader.stats.fps,
+        activity_cfg=settings.activity,
     )
 
     log.info("START")
     log.info("CONFIG: %s", Path(args.config).resolve())
     log.info("CAMERA: %s", settings.camera.id)
     log.info("MODEL: %s", settings.vision.model_path)
-    log.info("UI: %s", "off" if args.headless or not settings.ui.enabled else "on")
+    log.info("UI: %s", "on" if args.debug and settings.ui.enabled else "off")
 
     mqtt_worker.start()
     rtsp_reader.start()
     inference_worker.start()
 
     try:
-        if not args.headless and settings.ui.enabled:
+        if args.debug and settings.ui.enabled:
             UIWorker(settings.ui, frames, results, calibration, stop_event).run()
         else:
             while not stop_event.is_set():

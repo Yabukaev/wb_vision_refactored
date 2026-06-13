@@ -104,6 +104,11 @@ class TrackerSection:
     smoothing: float = 0.65
     min_hits: int = 1
     max_history: int = 80
+    walking_px_s: float = 15.0
+    still_px_s: float = 8.0
+    fallen_window_sec: float = 2.0
+    fallen_persist_sec: float = 10.0
+    sleep_still_sec: float = 30.0
 
 
 @dataclass(slots=True)
@@ -143,6 +148,17 @@ class CalibrationSection:
 
 
 @dataclass(slots=True)
+class ActivitySection:
+    enabled: bool = False
+    det_model_path: str = "yolo11n.pt"
+    det_conf: float = 0.30
+    det_fps: float = 2.0
+    clip_enabled: bool = False
+    clip_model: str = "openai/clip-vit-base-patch32"
+    clip_fps: float = 0.5
+
+
+@dataclass(slots=True)
 class UISection:
     enabled: bool = True
     window_width: int = 1600
@@ -163,6 +179,7 @@ class Settings:
     tracker: TrackerSection = field(default_factory=TrackerSection)
     mqtt: MqttSection = field(default_factory=MqttSection)
     calibration: CalibrationSection = field(default_factory=CalibrationSection)
+    activity: ActivitySection = field(default_factory=ActivitySection)
     ui: UISection = field(default_factory=UISection)
 
 
@@ -206,6 +223,7 @@ class ConfigManager:
             tracker=_section(TrackerSection, raw.get("tracker", {})),
             mqtt=_section(MqttSection, raw.get("mqtt", {})),
             calibration=_section(CalibrationSection, raw.get("calibration", {})),
+            activity=_section(ActivitySection, raw.get("activity", {})),
             ui=_section(UISection, raw.get("ui", {})),
         )
         if not str(settings.camera.rtsp_url).strip():
