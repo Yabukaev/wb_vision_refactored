@@ -20,16 +20,15 @@ CAL_MODE_HYBRID = "hybrid"    # user enters X,Y + optional measured distance for
 CAL_MODES = (CAL_MODE_XY, CAL_MODE_LASER, CAL_MODE_HYBRID)
 
 _MODE_LABELS = {
-    CAL_MODE_XY: "XY-координаты",
-    CAL_MODE_LASER: "Лазер + угол",
-    CAL_MODE_HYBRID: "Гибрид",
+    CAL_MODE_XY:     "XY coords",
+    CAL_MODE_LASER:  "Laser+angle",
+    CAL_MODE_HYBRID: "Hybrid",
 }
 
-# Fields required per mode for point entry (in order shown to user)
 _MODE_ENTRY_FIELDS: dict[str, list[tuple[str, str]]] = {
-    CAL_MODE_XY:     [("x_m", "X от AIM, м"), ("y_m", "Y от AIM, м")],
-    CAL_MODE_LASER:  [("dist_m", "Дист от AIM, м"), ("angle_deg", "Угол, °")],
-    CAL_MODE_HYBRID: [("x_m", "X от AIM, м"), ("y_m", "Y от AIM, м"), ("dist_m", "Дист (контроль), м")],
+    CAL_MODE_XY:     [("x_m", "X from AIM, m"), ("y_m", "Y from AIM, m")],
+    CAL_MODE_LASER:  [("dist_m", "Dist from AIM, m"), ("angle_deg", "Angle, deg")],
+    CAL_MODE_HYBRID: [("x_m", "X from AIM, m"), ("y_m", "Y from AIM, m"), ("dist_m", "Dist (check), m")],
 }
 
 

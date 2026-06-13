@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-from functools import lru_cache
 from typing import Optional
 
 import cv2
@@ -10,42 +8,8 @@ import numpy as np
 from app.types import TrackSnapshot, VisionPacket
 from app.vision.calibration import (
     CAL_MODE_HYBRID, CAL_MODE_LASER, CAL_MODE_XY, _point_to_xy,
-    CalibrationData, mode_entry_fields, mode_label,
+    CalibrationData,
 )
-
-# ── PIL Unicode text renderer ─────────────────────────────────────────────────
-
-try:
-    from PIL import Image as _PILImage, ImageDraw as _PILDraw, ImageFont as _PILFont
-    _PIL_OK = True
-except ImportError:
-    _PIL_OK = False
-
-def _find_font_file() -> Optional[str]:
-    for p in [
-        r"C:\Windows\Fonts\arial.ttf",
-        r"C:\Windows\Fonts\tahoma.ttf",
-        r"C:\Windows\Fonts\segoeui.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ]:
-        if os.path.exists(p):
-            return p
-    return None
-
-_FONT_FILE: Optional[str] = _find_font_file()
-
-
-@lru_cache(maxsize=20)
-def _get_pil_font(px_size: int):
-    if not _PIL_OK:
-        return None
-    if _FONT_FILE:
-        try:
-            return _PILFont.truetype(_FONT_FILE, px_size)
-        except Exception:
-            pass
-    return _PILFont.load_default()
 
 POSE_EDGES = [
     (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),
@@ -53,22 +17,21 @@ POSE_EDGES = [
     (11, 13), (13, 15), (12, 14), (14, 16),
 ]
 
-# Numeric fields shown in the panel (key, label)
 FIELD_ORDER = [
-    ("cam_to_aim_m",    "Лазер AIM→кам, м"),
-    ("camera_floor_x_m", "Cam X смещ, м"),
-    ("camera_floor_y_m", "Cam Y смещ, м"),
-    ("camera_height_m", "Высота кам (уст), м"),
-    ("room_width_m",    "Ширина зоны, м"),
-    ("room_depth_m",    "Глубина зоны, м"),
-    ("camera_pitch_deg","Pitch, °"),
-    ("camera_yaw_deg",  "Yaw, °"),
-    ("camera_roll_deg", "Roll, °"),
-    ("hfov_deg",        "HFOV, °"),
-    ("vfov_deg",        "VFOV, °"),
-    ("rotation_deg",    "Rot, °"),
-    ("lens_distortion_k1", "Lens k1"),
-    ("lens_distortion_k2", "Lens k2"),
+    ("cam_to_aim_m",      "Laser AIM->cam, m"),
+    ("camera_floor_x_m",  "Cam X offset, m"),
+    ("camera_floor_y_m",  "Cam Y offset, m"),
+    ("camera_height_m",   "Cam H (legacy), m"),
+    ("room_width_m",      "Room W, m"),
+    ("room_depth_m",      "Room D, m"),
+    ("camera_pitch_deg",  "Pitch, deg"),
+    ("camera_yaw_deg",    "Yaw, deg"),
+    ("camera_roll_deg",   "Roll, deg"),
+    ("hfov_deg",          "HFOV, deg"),
+    ("vfov_deg",          "VFOV, deg"),
+    ("rotation_deg",      "Rot, deg"),
+    ("lens_distortion_k1","Lens k1"),
+    ("lens_distortion_k2","Lens k2"),
 ]
 
 _MODE_COLORS = {
@@ -77,73 +40,83 @@ _MODE_COLORS = {
     CAL_MODE_HYBRID: (200, 130, 40),
 }
 
-_MODE_KEYS = (CAL_MODE_XY, CAL_MODE_LASER, CAL_MODE_HYBRID)
 _MODE_BTN_LABELS = {
-    CAL_MODE_XY:     "XY (рулетка)",
-    CAL_MODE_LASER:  "Лазер + угол",
-    CAL_MODE_HYBRID: "Гибрид",
+    CAL_MODE_XY:     "XY  (tape measure)",
+    CAL_MODE_LASER:  "Laser + angle",
+    CAL_MODE_HYBRID: "Hybrid",
 }
 
+_MODE_ENTRY_LABELS: dict[str, list[tuple[str, str]]] = {
+    CAL_MODE_XY:     [("x_m", "X from AIM, m"), ("y_m", "Y from AIM, m")],
+    CAL_MODE_LASER:  [("dist_m", "Dist from AIM, m"), ("angle_deg", "Angle, deg")],
+    CAL_MODE_HYBRID: [("x_m", "X from AIM, m"), ("y_m", "Y from AIM, m"), ("dist_m", "Dist (check), m")],
+}
 
-def _text(
-    img: np.ndarray,
-    text: str,
-    org: tuple[int, int],
-    scale: float = 0.55,
-    color: tuple[int, int, int] = (235, 235, 235),
-    thickness: int = 1,
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+def _t(img: np.ndarray, text: str, org: tuple[int, int],
+       scale: float = 0.48, color: tuple[int, int, int] = (235, 235, 235),
+       thickness: int = 1) -> None:
+    cv2.putText(img, text, org, _FONT, scale, color, thickness, cv2.LINE_AA)
+
+
+# ── calibration overlay ───────────────────────────────────────────────────────
+
+def draw_calibration(
+    frame: np.ndarray,
+    cal: CalibrationData,
+    scale: float = 1.0,
+    pending_px: Optional[int] = None,
+    pending_py: Optional[int] = None,
 ) -> None:
-    # Fast path: pure ASCII — OpenCV handles it natively
-    if text.isascii():
-        cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
-        return
+    mode = cal.cal_mode
+    col = _MODE_COLORS.get(mode, (0, 0, 255))
 
-    # Unicode/Cyrillic: render via PIL on a small crop of the image
-    if not _PIL_OK:
-        # Fallback: strip to ASCII and draw what we can
-        cv2.putText(img, text.encode("ascii", "replace").decode(), org,
-                    cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
-        return
+    ax, ay = int(cal.aim_px * scale), int(cal.aim_py * scale)
+    cv2.drawMarker(frame, (ax, ay), (0, 0, 255), cv2.MARKER_CROSS, 28, 2, cv2.LINE_AA)
+    cv2.circle(frame, (ax, ay), 7, (0, 0, 255), 2, cv2.LINE_AA)
+    _t(frame, "AIM", (ax + 12, ay - 6), 0.52, (0, 80, 255), 2)
 
-    px_size = max(9, int(scale * 26))
-    font = _get_pil_font(px_size)
-    if font is None:
-        return
+    pts_cal = cal.cal_points or []
+    if pts_cal:
+        scaled = [(int(pt["px"] * scale), int(pt["py"] * scale)) for pt in pts_cal]
 
-    x, y = org  # OpenCV: (x, baseline_y)
+        for i in range(1, len(scaled)):
+            cv2.line(frame, scaled[i - 1], scaled[i], col, 1, cv2.LINE_AA)
+        if len(scaled) >= 4:
+            cv2.line(frame, scaled[-1], scaled[0], col, 1, cv2.LINE_AA)
+            ov = frame.copy()
+            cv2.fillPoly(ov, [np.array(scaled, dtype=np.int32)], col)
+            cv2.addWeighted(ov, 0.12, frame, 0.88, 0, frame)
 
-    # Measure text to compute crop bounds
-    tmp = _PILImage.new("RGB", (1, 1))
-    tmp_draw = _PILDraw.Draw(tmp)
-    try:
-        bbox = tmp_draw.textbbox((0, 0), text, font=font)  # (l, t, r, b) relative to anchor
-        tw = bbox[2] - bbox[0]
-        th = bbox[3] - bbox[1]
-        # bbox[1] is negative for FreeTypeFont (ascent above baseline)
-        draw_x = x - bbox[0]
-        draw_y = y + bbox[1]  # moves text up so baseline aligns with org y
-    except AttributeError:
-        # Older Pillow: use getsize
-        tw, th = font.getsize(text)  # type: ignore[attr-defined]
-        draw_x, draw_y = x, y - th
-        bbox = (0, -th, tw, 0)
+        for sp in scaled:
+            cv2.line(frame, (ax, ay), sp, (80, 80, 200), 1, cv2.LINE_AA)
 
-    # Crop region (add margin for descenders / rounding)
-    x0 = max(0, x - 2)
-    y0 = max(0, draw_y - 2)
-    x1 = min(img.shape[1], x0 + tw + 8)
-    y1 = min(img.shape[0], draw_y + th + 6)
+        for i, (sp, pt) in enumerate(zip(scaled, pts_cal)):
+            cv2.circle(frame, sp, 7, col, -1, cv2.LINE_AA)
+            cv2.circle(frame, sp, 9, (255, 255, 255), 1, cv2.LINE_AA)
+            wx, wy = _point_to_xy(pt, mode)
+            _t(frame, f"P{i+1}({wx:.1f},{wy:.1f})", (sp[0] + 10, sp[1] + 5), 0.40, (255, 255, 255), 1)
 
-    if x1 <= x0 or y1 <= y0:
-        return
+    elif cal.floor_points:
+        pts = [(int(p[0] * scale), int(p[1] * scale)) for p in cal.floor_points]
+        for i in range(1, len(pts)):
+            cv2.line(frame, pts[i - 1], pts[i], (120, 60, 60), 1)
+        if len(pts) == 4:
+            cv2.line(frame, pts[3], pts[0], (120, 60, 60), 1)
+        for i, p in enumerate(pts):
+            cv2.circle(frame, p, 5, (180, 80, 80), -1)
+            _t(frame, f"L{i+1}", (p[0] + 8, p[1] + 5), 0.40, (200, 120, 120), 1)
 
-    crop = img[y0:y1, x0:x1].copy()
-    pil_crop = _PILImage.fromarray(crop[..., ::-1])   # BGR → RGB
-    draw = _PILDraw.Draw(pil_crop)
-    fill_rgb = (color[2], color[1], color[0])          # BGR → RGB
-    draw.text((draw_x - x0, draw_y - y0), text, font=font, fill=fill_rgb)
-    img[y0:y1, x0:x1] = np.array(pil_crop)[..., ::-1]  # RGB → BGR
+    if pending_px is not None and pending_py is not None:
+        spx, spy = int(pending_px * scale), int(pending_py * scale)
+        cv2.drawMarker(frame, (spx, spy), (0, 255, 255), cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
+        cv2.circle(frame, (spx, spy), 10, (0, 255, 255), 2, cv2.LINE_AA)
+        _t(frame, "Enter values ->", (spx + 14, spy + 5), 0.44, (0, 255, 255), 1)
 
+
+# ── track overlay ─────────────────────────────────────────────────────────────
 
 def draw_pose(frame: np.ndarray, keypoints: Optional[np.ndarray], scale: float = 1.0) -> None:
     if keypoints is None:
@@ -158,67 +131,6 @@ def draw_pose(frame: np.ndarray, keypoints: Optional[np.ndarray], scale: float =
         x, y = int(p[0] * scale), int(p[1] * scale)
         if x > 1 and y > 1:
             cv2.circle(frame, (x, y), 3, (255, 0, 255), -1, cv2.LINE_AA)
-
-
-def draw_calibration(
-    frame: np.ndarray,
-    cal: CalibrationData,
-    scale: float = 1.0,
-    pending_px: Optional[int] = None,
-    pending_py: Optional[int] = None,
-) -> None:
-    mode = cal.cal_mode
-    col = _MODE_COLORS.get(mode, (0, 0, 255))
-
-    # AIM point
-    ax, ay = int(cal.aim_px * scale), int(cal.aim_py * scale)
-    cv2.drawMarker(frame, (ax, ay), (0, 0, 255), cv2.MARKER_CROSS, 28, 2, cv2.LINE_AA)
-    cv2.circle(frame, (ax, ay), 7, (0, 0, 255), 2, cv2.LINE_AA)
-    _text(frame, "AIM (0,0)", (ax + 12, ay - 10), 0.52, (0, 80, 255), 2)
-
-    # Calibration points (new system)
-    pts_cal = cal.cal_points or []
-    if pts_cal:
-        scaled = [(int(pt["px"] * scale), int(pt["py"] * scale)) for pt in pts_cal]
-
-        # Lines connecting consecutive points
-        for i in range(1, len(scaled)):
-            cv2.line(frame, scaled[i - 1], scaled[i], col, 1, cv2.LINE_AA)
-        if len(scaled) >= 4:
-            cv2.line(frame, scaled[-1], scaled[0], col, 1, cv2.LINE_AA)
-            overlay = frame.copy()
-            cv2.fillPoly(overlay, [np.array(scaled, dtype=np.int32)], col)
-            cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
-
-        # Line from AIM to each point
-        for sp in scaled:
-            cv2.line(frame, (ax, ay), sp, (80, 80, 200), 1, cv2.LINE_AA)
-
-        # Point markers + labels
-        for i, (sp, pt) in enumerate(zip(scaled, pts_cal)):
-            cv2.circle(frame, sp, 7, col, -1, cv2.LINE_AA)
-            cv2.circle(frame, sp, 9, (255, 255, 255), 1, cv2.LINE_AA)
-            wx, wy = _point_to_xy(pt, mode)
-            label = f"P{i + 1} ({wx:.1f},{wy:.1f})"
-            _text(frame, label, (sp[0] + 10, sp[1] - 6), 0.44, (255, 255, 255), 1)
-
-    # Legacy floor points (4-corner fallback, shown dimmer)
-    elif cal.floor_points:
-        pts = [(int(p[0] * scale), int(p[1] * scale)) for p in cal.floor_points]
-        for i in range(1, len(pts)):
-            cv2.line(frame, pts[i - 1], pts[i], (120, 60, 60), 1)
-        if len(pts) == 4:
-            cv2.line(frame, pts[3], pts[0], (120, 60, 60), 1)
-        for i, p in enumerate(pts):
-            cv2.circle(frame, p, 5, (180, 80, 80), -1)
-            _text(frame, f"L{i + 1}", (p[0] + 8, p[1] - 6), 0.42, (200, 120, 120), 1)
-
-    # Pending pixel (user clicked, waiting for value entry)
-    if pending_px is not None and pending_py is not None:
-        spx, spy = int(pending_px * scale), int(pending_py * scale)
-        cv2.drawMarker(frame, (spx, spy), (0, 255, 255), cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
-        cv2.circle(frame, (spx, spy), 10, (0, 255, 255), 2, cv2.LINE_AA)
-        _text(frame, "Введите значения →", (spx + 14, spy - 8), 0.48, (0, 255, 255), 1)
 
 
 def draw_tracks(
@@ -255,11 +167,13 @@ def draw_tracks(
             parts.append(f"D:{d:.2f}m")
 
         txt = "  ".join(parts)
-        tx, ty = fx + 10, max(24, fy - 10)
-        (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(frame, (tx - 4, ty - th - 8), (tx + tw + 6, ty + 6), (0, 0, 0), -1)
-        _text(frame, txt, (tx, ty), 0.5, (255, 255, 255), 1)
+        tx, ty = fx + 10, max(18, fy - 8)
+        (tw, th), _ = cv2.getTextSize(txt, _FONT, 0.46, 1)
+        cv2.rectangle(frame, (tx - 3, ty - th - 6), (tx + tw + 4, ty + 4), (0, 0, 0), -1)
+        _t(frame, txt, (tx, ty), 0.46, (255, 255, 255), 1)
 
+
+# ── side panel ────────────────────────────────────────────────────────────────
 
 def draw_panel(
     canvas: np.ndarray,
@@ -272,175 +186,181 @@ def draw_panel(
     editing_key: Optional[str],
 ) -> None:
     h, w = canvas.shape[:2]
-    panel_w = max(1, w - panel_x)
-
     cv2.rectangle(canvas, (panel_x, 0), (w, h), (24, 24, 28), -1)
     cv2.line(canvas, (panel_x, 0), (panel_x, h), (80, 80, 90), 1)
 
-    pad = 14
+    pad = 12
     x = panel_x + pad
     right = w - pad
-    y = 22
+    y = 18
 
-    title_scale = 0.58
-    normal_scale = 0.46
-    small_scale = 0.42
-    line_h = 22
-    field_h = 28
+    LINE = 20    # row height
+    FIELD_H = 26 # input field height
+    BTN_H = 26   # button height
 
-    cal_mode = ui_state.get("cal_mode", CAL_MODE_XY)
-    point_pick_active = ui_state.get("point_pick_active", False)
-    pending_px = ui_state.get("pending_px")
-    pending_py = ui_state.get("pending_py")
-    entry_fields = ui_state.get("point_entry_fields", [])
-    entry_cursor = ui_state.get("point_entry_cursor", 0)
-    entry_buf = ui_state.get("point_entry_buf", "")
-    entry_vals = ui_state.get("point_entry_values", {})
-    cal_points = ui_state.get("cal_points", [])
+    cal_mode      = ui_state.get("cal_mode", CAL_MODE_XY)
+    pick_active   = ui_state.get("point_pick_active", False)
+    pending_px    = ui_state.get("pending_px")
+    pending_py    = ui_state.get("pending_py")
+    entry_fields  = ui_state.get("point_entry_fields", [])
+    entry_cursor  = ui_state.get("point_entry_cursor", 0)
+    entry_buf     = ui_state.get("point_entry_buf", "")
+    entry_vals    = ui_state.get("point_entry_values", {})
+    cal_points    = ui_state.get("cal_points", [])
     hybrid_errors = ui_state.get("hybrid_errors", [])
+
+    def _check_y(extra: int = 0) -> bool:
+        return y + extra < h - 40
 
     def section(title: str) -> None:
         nonlocal y
+        if not _check_y(20):
+            return
         y += 6
-        _text(canvas, title.upper(), (x, y), title_scale, (255, 255, 255), 1)
-        y += 6
+        cv2.putText(canvas, title, (x, y), _FONT, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+        y += 4
         cv2.line(canvas, (x, y), (right, y), (70, 70, 76), 1)
-        y += 16
+        y += 14
 
-    def row(label: str, value: str, col: tuple = (185, 185, 190)) -> None:
+    def row(label: str, value: str, vcol: tuple = (245, 245, 245)) -> None:
         nonlocal y
-        _text(canvas, label, (x, y), normal_scale, col, 1)
-        _text(canvas, value, (x + 130, y), normal_scale, (245, 245, 245), 1)
-        y += line_h
-
-    def button(name: str, text: str, active: bool = False, color: tuple = (52, 52, 60)) -> None:
-        nonlocal y
-        if y + 36 > h - 10:
+        if not _check_y():
             return
-        x1, y1, x2, y2 = x, y, right, y + 30
+        cv2.putText(canvas, label, (x, y), _FONT, 0.40, (170, 170, 175), 1, cv2.LINE_AA)
+        cv2.putText(canvas, value, (x + 128, y), _FONT, 0.40, vcol, 1, cv2.LINE_AA)
+        y += LINE
+
+    def button(name: str, label: str, active: bool = False) -> None:
+        nonlocal y
+        if not _check_y(BTN_H):
+            return
+        x1, y1, x2, y2 = x, y, right, y + BTN_H
         buttons[name] = (x1, y1, x2, y2)
-        bg = color if not active else tuple(min(255, c + 60) for c in color)
-        border = (200, 200, 210) if active else (110, 110, 120)
+        bg = (70, 70, 90) if active else (44, 44, 52)
+        brd = (190, 190, 210) if active else (100, 100, 112)
         cv2.rectangle(canvas, (x1, y1), (x2, y2), bg, -1)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), border, 1)
-        _text(canvas, text, (x1 + 8, y1 + 20), 0.46, (255, 255, 255) if active else (220, 220, 225), 1)
-        y += 36
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), brd, 1)
+        cv2.putText(canvas, label, (x1 + 7, y1 + 17), _FONT, 0.42, (240, 240, 245), 1, cv2.LINE_AA)
+        y += BTN_H + 4
 
-    def mode_button(name: str, mode_key: str) -> None:
+    def mode_btn(name: str, mode_key: str) -> None:
         nonlocal y
-        if y + 30 > h - 10:
+        if not _check_y(BTN_H):
             return
-        label = _MODE_BTN_LABELS[mode_key]
         is_active = cal_mode == mode_key
         col = _MODE_COLORS.get(mode_key, (60, 60, 60))
-        btn_col = tuple(max(0, c - 30) for c in col) if not is_active else col
-        x1, y1, x2, y2 = x, y, right, y + 28
+        bg = col if is_active else tuple(max(0, c - 40) for c in col)
+        brd = col if is_active else (80, 80, 90)
+        x1, y1, x2, y2 = x, y, right, y + BTN_H
         buttons[name] = (x1, y1, x2, y2)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), btn_col, -1)
-        border_col = col if is_active else (90, 90, 100)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), border_col, 1 if not is_active else 2)
-        _text(canvas, ("✓ " if is_active else "  ") + label, (x1 + 6, y1 + 19), 0.44, (255, 255, 255), 1)
-        y += 32
-
-    def inline_field(key: str, label: str, value: str, active: bool) -> None:
-        nonlocal y
-        if y + field_h + 4 > h - 60:
-            return
-        label_w = min(130, int(panel_w * 0.40))
-        x1, y1, x2, y2 = x + label_w, y - 18, right, y + field_h - 18
-        fields[key] = (x1, y1, x2, y2)
-        _text(canvas, label, (x, y), small_scale, (195, 195, 200), 1)
-        bg = (78, 72, 110) if active else (42, 42, 48)
-        border = (190, 170, 255) if active else (90, 90, 100)
         cv2.rectangle(canvas, (x1, y1), (x2, y2), bg, -1)
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), border, 1)
-        val = (value + "_") if active else value
-        _text(canvas, val, (x1 + 6, y1 + 19), 0.46, (255, 255, 255), 1)
-        y += 30
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), brd, 1 if not is_active else 2)
+        prefix = "* " if is_active else "  "
+        cv2.putText(canvas, prefix + _MODE_BTN_LABELS[mode_key],
+                    (x1 + 6, y1 + 17), _FONT, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
+        y += BTN_H + 4
+
+    def input_field(key: str, label: str, value: str, active: bool) -> None:
+        nonlocal y
+        if not _check_y(FIELD_H + 4):
+            return
+        lw = 120
+        x1, y1, x2, y2 = x + lw, y - 18, right, y + FIELD_H - 18
+        fields[key] = (x1, y1, x2, y2)
+        cv2.putText(canvas, label, (x, y), _FONT, 0.38, (185, 185, 190), 1, cv2.LINE_AA)
+        bg = (70, 64, 110) if active else (38, 38, 46)
+        brd = (180, 155, 255) if active else (85, 85, 95)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), bg, -1)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), brd, 1)
+        disp = (value + "_") if active else value
+        cv2.putText(canvas, disp, (x1 + 5, y1 + 17), _FONT, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+        y += 28
 
     # ── Status ────────────────────────────────────────────────────────────────
-    section("Статус")
-    people = len(packet.tracks) if packet else 0
-    row("FPS rtsp/infer", f"{(packet.reader_fps if packet else 0):.1f} / {(packet.inference_fps if packet else 0):.1f}")
-    row("Инференс", f"{(packet.infer_ms if packet else 0):.0f} мс")
-    row("CPU / RAM", f"{(packet.cpu_percent if packet else 0):.0f}% / {(packet.ram_percent if packet else 0):.0f}%")
-    row("Людей", str(people))
-    mode_str = mode_label(cal_mode)
-    n_pts = len(cal_points)
-    row("Режим кал.", f"{mode_str} [{n_pts} тч]", (180, 200, 255))
+    section("STATUS")
+    p = packet
+    row("RTSP / Infer FPS",
+        f"{(p.reader_fps if p else 0):.1f} / {(p.inference_fps if p else 0):.1f}")
+    row("Infer", f"{(p.infer_ms if p else 0):.0f} ms")
+    row("CPU / RAM",
+        f"{(p.cpu_percent if p else 0):.0f}% / {(p.ram_percent if p else 0):.0f}%")
+    row("People", str(len(p.tracks) if p else 0))
+    mode_names = {CAL_MODE_XY: "XY", CAL_MODE_LASER: "Laser+A", CAL_MODE_HYBRID: "Hybrid"}
+    row("Cal mode", f"{mode_names.get(cal_mode, cal_mode)}  [{len(cal_points)} pts]",
+        (160, 200, 255))
 
-    # ── Mode selection ────────────────────────────────────────────────────────
-    section("Режим позиционирования")
-    mode_button("mode_xy", CAL_MODE_XY)
-    mode_button("mode_laser", CAL_MODE_LASER)
-    mode_button("mode_hybrid", CAL_MODE_HYBRID)
+    # ── Cal mode buttons ──────────────────────────────────────────────────────
+    section("CAL MODE")
+    mode_btn("mode_xy",     CAL_MODE_XY)
+    mode_btn("mode_laser",  CAL_MODE_LASER)
+    mode_btn("mode_hybrid", CAL_MODE_HYBRID)
 
     # ── Actions ───────────────────────────────────────────────────────────────
-    section("Действия")
-    button("aim", "  Установить AIM (A)")
-    if not point_pick_active and pending_px is None:
-        button("add_point", "  + Добавить точку (F)")
+    section("ACTIONS")
+    button("aim", "Set AIM  (A)")
+    if not pick_active and pending_px is None:
+        button("add_point", "+ Add point  (F)")
     if cal_points:
-        button("remove_point", "  − Удалить последнюю")
-        button("clear_points", "  Очистить все точки")
-    button("save", "  Сохранить (S)")
+        button("remove_point", "- Remove last")
+        button("clear_points", "Clear all points")
+    button("save", "Save  (S)")
+
+    # ── Point pick hint ───────────────────────────────────────────────────────
+    if pick_active and _check_y(20):
+        y += 4
+        cv2.putText(canvas, ">> CLICK FLOOR IN VIDEO <<",
+                    (x, y), _FONT, 0.44, (0, 255, 255), 1, cv2.LINE_AA)
+        y += LINE
 
     # ── Point entry form ──────────────────────────────────────────────────────
-    if point_pick_active:
-        y += 6
-        _text(canvas, "КЛИКНИТЕ ТОЧКУ НА ВИДЕО", (x, y), 0.50, (0, 255, 255), 1)
-        y += 22
-        _text(canvas, f"Точка #{len(cal_points) + 1}", (x, y), small_scale, (180, 180, 185), 1)
-        y += 18
-
     elif pending_px is not None:
-        section(f"ТОЧКА #{len(cal_points) + 1} — введите значения")
-        for i, (fkey, flabel) in enumerate(entry_fields):
-            done_val = entry_vals.get(fkey, "")
-            is_active = i == entry_cursor
-            if i < entry_cursor:
-                inline_field(f"pe_{fkey}", flabel, done_val, False)
-            elif is_active:
-                inline_field(f"pe_{fkey}", flabel, entry_buf, True)
-            else:
-                inline_field(f"pe_{fkey}", flabel, "—", False)
-        y += 4
-        _text(canvas, "Enter — далее   Esc — отмена", (x, y), small_scale, (160, 160, 165), 1)
-        y += 20
+        n = len(cal_points) + 1
+        section(f"POINT #{n}  px({pending_px},{pending_py})")
+        labels = _MODE_ENTRY_LABELS.get(cal_mode, [])
+        for i, (fkey, flabel) in enumerate(labels):
+            done = entry_vals.get(fkey, "")
+            is_cur = i == entry_cursor
+            is_done = i < entry_cursor
+            input_field(
+                f"pe_{fkey}", flabel,
+                done if is_done else (entry_buf if is_cur else "--"),
+                is_cur,
+            )
+        if _check_y():
+            cv2.putText(canvas, "Enter=next  Esc=cancel",
+                        (x, y), _FONT, 0.36, (150, 150, 158), 1, cv2.LINE_AA)
+            y += LINE
 
-    # ── Cal points list ───────────────────────────────────────────────────────
-    if cal_points:
-        section(f"Точки ({len(cal_points)})")
-        for i, pt in enumerate(cal_points[-6:]):  # show last 6
-            idx = len(cal_points) - min(6, len(cal_points)) + i
+    # ── Points list ───────────────────────────────────────────────────────────
+    if cal_points and _check_y(16):
+        section(f"POINTS  ({len(cal_points)})")
+        for i, pt in enumerate(cal_points[-5:]):
+            if not _check_y():
+                break
+            idx = len(cal_points) - min(5, len(cal_points)) + i
             wx, wy = _point_to_xy(pt, cal_mode)
-            if y + line_h > h - 60:
+            cv2.putText(canvas,
+                        f"P{idx+1} px({pt['px']},{pt['py']}) -> ({wx:.2f},{wy:.2f})m",
+                        (x, y), _FONT, 0.36, (150, 195, 150), 1, cv2.LINE_AA)
+            y += 16
+        for ia, ib, meas, comp, err in hybrid_errors[:3]:
+            if not _check_y():
                 break
-            lbl = f"P{idx + 1}  px({pt['px']},{pt['py']})  →  ({wx:.2f}, {wy:.2f})м"
-            _text(canvas, lbl, (x, y), 0.38, (170, 200, 170), 1)
-            y += 18
+            ec = (80, 220, 80) if err < 0.05 else (80, 140, 255) if err < 0.15 else (60, 60, 220)
+            cv2.putText(canvas,
+                        f"P{ia+1}->P{ib+1} meas={meas:.2f} calc={comp:.2f} err={err:.3f}m",
+                        (x, y), _FONT, 0.34, ec, 1, cv2.LINE_AA)
+            y += 15
 
-        # Hybrid validation errors
-        if hybrid_errors:
-            y += 4
-            for ia, ib, meas, comp, err in hybrid_errors[:3]:
-                col = (100, 255, 100) if err < 0.05 else (80, 120, 255) if err < 0.15 else (80, 80, 255)
-                _text(canvas, f"P{ia+1}→P{ib+1}: изм={meas:.2f} расч={comp:.2f} Δ={err:.3f}м",
-                      (x, y), 0.38, col, 1)
-                y += 16
-
-    # ── Numeric fields ────────────────────────────────────────────────────────
-    if y + 60 < h:
-        section("Параметры")
+    # ── Numeric params ────────────────────────────────────────────────────────
+    if _check_y(40):
+        section("PARAMS")
         for key, label in FIELD_ORDER:
-            if y + field_h + 4 > h - 55:
+            if not _check_y(FIELD_H + 2):
                 break
-            val = field_values.get(key, "")
-            inline_field(key, label, val, editing_key == key)
+            input_field(key, label, field_values.get(key, ""), editing_key == key)
 
     # ── Hints ─────────────────────────────────────────────────────────────────
-    hints = ["A: AIM  F: +точка  S: сохр  Esc: выйти", "P: поза  T: треки  C: калибр"]
-    yy = h - 36
-    for line in hints:
-        _text(canvas, line, (x, yy), 0.38, (155, 155, 162), 1)
-        yy += 18
+    yy = h - 32
+    cv2.putText(canvas, "A:AIM  F:+pt  S:save  Esc:quit  P/T/C:toggle",
+                (x, yy), _FONT, 0.35, (140, 140, 148), 1, cv2.LINE_AA)

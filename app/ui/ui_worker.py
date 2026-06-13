@@ -108,11 +108,11 @@ class UIWorker:
         if (ww, wh) != self._waiting_canvas_size:
             canvas = np.zeros((wh, ww, 3), dtype=np.uint8)
             lines = [
-                "Ожидание RTSP потока...",
-                "ESC — выход",
-                "A — установить AIM",
-                "F — добавить точку калибровки",
-                "S — сохранить",
+                "Waiting for RTSP stream...",
+                "ESC - quit",
+                "A - set AIM point",
+                "F - add cal point",
+                "S - save",
             ]
             y = 54
             for line in lines:
