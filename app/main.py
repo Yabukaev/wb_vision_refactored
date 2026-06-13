@@ -110,7 +110,10 @@ def main() -> int:
     web_server = None
     if settings.web.enabled:
         from app.web.server import WebServer
-        web_server = WebServer(settings.web, frames, results, calibration, stop_event)
+        web_server = WebServer(
+            settings.web, frames, results, calibration, stop_event,
+            vision_cfg=settings.vision, tracker_cfg=settings.tracker,
+        )
         log.info("WEB: http://%s:%s", settings.web.host, settings.web.port)
 
     mqtt_worker.start()

@@ -9,8 +9,9 @@ import numpy as np
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
-from app.config import WebSection
+from app.config import TrackerSection, VisionSection, WebSection
 from app.core.latest_value import LatestValue
+from app.runtime_tuning import apply_tuning, get_tuning, tuning_specs
 from app.types import FramePacket, VisionPacket
 from app.vision.calibration import CalibrationManager
 from app.vision.overlay import draw_calibration, draw_tracks
@@ -22,8 +23,12 @@ def build_app(
     results: LatestValue[VisionPacket],
     calibration: CalibrationManager,
     web_cfg: WebSection,
+    vision_cfg: Optional[VisionSection] = None,
+    tracker_cfg: Optional[TrackerSection] = None,
 ) -> FastAPI:
     app = FastAPI(title="WB Vision")
+    vision_cfg = vision_cfg if vision_cfg is not None else VisionSection()
+    tracker_cfg = tracker_cfg if tracker_cfg is not None else TrackerSection()
 
     # ── pages ────────────────────────────────────────────────────────────────
     @app.get("/", response_class=HTMLResponse)
@@ -76,7 +81,17 @@ def build_app(
                 "ram": round(packet.ram_percent, 0) if packet else 0.0,
             },
             "tracks": tracks,
+            "tuning": get_tuning(vision_cfg, tracker_cfg),
+            "tuning_specs": tuning_specs(),
         })
+
+    @app.post("/api/tuning")
+    def set_tuning(body: dict) -> JSONResponse:
+        try:
+            new_val = apply_tuning(vision_cfg, tracker_cfg, str(body["key"]), body["value"])
+        except KeyError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "value": new_val})
 
     # ── calibration mutations ────────────────────────────────────────────────
     @app.post("/api/aim")
@@ -186,6 +201,8 @@ class WebServer(threading.Thread):
         results: LatestValue[VisionPacket],
         calibration: CalibrationManager,
         stop_event: threading.Event,
+        vision_cfg: Optional[VisionSection] = None,
+        tracker_cfg: Optional[TrackerSection] = None,
     ) -> None:
         super().__init__(name="web-server", daemon=True)
         self.cfg = web_cfg
@@ -193,6 +210,8 @@ class WebServer(threading.Thread):
         self.results = results
         self.calibration = calibration
         self.stop_event = stop_event
+        self.vision_cfg = vision_cfg
+        self.tracker_cfg = tracker_cfg
         self._server: Optional[object] = None
 
     def run(self) -> None:
@@ -202,7 +221,10 @@ class WebServer(threading.Thread):
 
         log = logging.getLogger("web")
         try:
-            app = build_app(self.frames, self.results, self.calibration, self.cfg)
+            app = build_app(
+                self.frames, self.results, self.calibration, self.cfg,
+                self.vision_cfg, self.tracker_cfg,
+            )
             config = uvicorn.Config(
                 app, host=self.cfg.host, port=int(self.cfg.port),
                 log_level="warning", access_log=False,

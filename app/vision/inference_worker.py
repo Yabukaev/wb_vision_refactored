@@ -66,7 +66,6 @@ class InferenceWorker(threading.Thread):
             self.activity_classifier.start()
         self._mqtt(f"{self.camera_cfg.id}/status", "online", retain=True)
         last_seq = 0
-        min_interval = 1.0 / max(0.1, float(self.vision_cfg.inference_fps))
 
         while not self.stop_event.is_set():
             packet, seq = self.frames.wait_next(last_seq=last_seq, timeout=0.5)
@@ -75,6 +74,8 @@ class InferenceWorker(threading.Thread):
             last_seq = seq
 
             now = time.time()
+            # read inference_fps live so the web UI can retune it without restart
+            min_interval = 1.0 / max(0.1, float(self.vision_cfg.inference_fps))
             if now - self._last_infer_ts < min_interval:
                 continue
 

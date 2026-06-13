@@ -6,7 +6,7 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import ConfigManager, WebSection
+from app.config import ConfigManager, TrackerSection, VisionSection, WebSection
 from app.core.latest_value import LatestValue
 from app.vision.calibration import CalibrationManager
 from app.web.server import build_app
@@ -26,9 +26,12 @@ def client(tmp_path, monkeypatch) -> TestClient:
     cfg = tmp_path / "config.yaml"
     cfg.write_text(CONFIG_YAML.format(cal_file=cal_file), encoding="utf-8")
     calibration = CalibrationManager(ConfigManager(cfg))
-    app = build_app(LatestValue(), LatestValue(), calibration, WebSection())
+    vision, tracker = VisionSection(), TrackerSection()
+    app = build_app(LatestValue(), LatestValue(), calibration, WebSection(), vision, tracker)
     c = TestClient(app)
     c.calibration = calibration  # type: ignore[attr-defined]
+    c.vision = vision  # type: ignore[attr-defined]
+    c.tracker = tracker  # type: ignore[attr-defined]
     return c
 
 
@@ -67,6 +70,26 @@ def test_set_value_rejects_unknown_key(client):
     r = client.post("/api/value", json={"key": "nope", "value": 1})
     assert r.status_code == 400
     assert r.json()["ok"] is False
+
+
+def test_state_includes_tuning(client):
+    data = client.get("/api/state").json()
+    assert "tuning" in data and "tuning_specs" in data
+    assert data["tuning"]["inference_fps"] == client.vision.inference_fps
+
+
+def test_tuning_updates_live_cfg(client):
+    r = client.post("/api/tuning", json={"key": "inference_fps", "value": 8})
+    assert r.json()["ok"] and client.vision.inference_fps == 8.0
+    client.post("/api/tuning", json={"key": "match_distance_px", "value": 150})
+    assert client.tracker.match_distance_px == 150.0
+
+
+def test_tuning_clamps_and_rejects(client):
+    hi = client.post("/api/tuning", json={"key": "inference_fps", "value": 9999}).json()
+    assert hi["value"] == 30.0
+    bad = client.post("/api/tuning", json={"key": "nope", "value": 1})
+    assert bad.status_code == 400
 
 
 def test_zone_add_and_delete(client):

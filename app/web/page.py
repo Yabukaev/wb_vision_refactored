@@ -82,6 +82,9 @@ INDEX_HTML = r"""<!doctype html>
     <div class="row"><label>Room W, m</label><input id="v_room_width_m" type="number" step="0.01"></div>
     <div class="row"><label>Room D, m</label><input id="v_room_depth_m" type="number" step="0.01"></div>
 
+    <h2>Runtime tuning</h2>
+    <div id="tuning"></div>
+
     <h2>Zones</h2>
     <div>
       <span class="btn" id="b_zone">Draw zone</span>
@@ -156,10 +159,42 @@ for (let i=0;i<4;i++) {
 });
 
 let editing = null;
-document.querySelectorAll('input').forEach(el => {
+function trackFocus(el){
   el.addEventListener('focus', () => editing = el.id);
   el.addEventListener('blur', () => { if (editing===el.id) editing=null; });
-});
+}
+document.querySelectorAll('input').forEach(trackFocus);
+
+let tuningBuilt = false;
+function buildTuning(specs){
+  const box = document.getElementById('tuning');
+  box.innerHTML = '';
+  Object.keys(specs).forEach(k => {
+    const s = specs[k];
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = s.label;
+    const rng = document.createElement('input'); rng.type='range'; rng.id='t_'+k;
+    rng.min=s.lo; rng.max=s.hi; rng.step=s.step; rng.style.flex='1';
+    const out = document.createElement('span'); out.id='tv_'+k; out.style.width='44px';
+    out.style.textAlign='right'; out.className='muted';
+    rng.addEventListener('input', () => { out.textContent = rng.value; });
+    rng.addEventListener('change', async () => {
+      const r = await post('/api/tuning', {key:k, value:parseFloat(rng.value)});
+      if (r && r.value!=null) out.textContent = r.value;
+    });
+    trackFocus(rng);
+    row.appendChild(lab); row.appendChild(rng); row.appendChild(out);
+    box.appendChild(row);
+  });
+  tuningBuilt = true;
+}
+function updateTuning(vals){
+  Object.keys(vals).forEach(k => {
+    if (editing==='t_'+k) return;
+    const rng=document.getElementById('t_'+k), out=document.getElementById('tv_'+k);
+    if (rng){ rng.value=vals[k]; if(out) out.textContent=vals[k]; }
+  });
+}
 
 function flash(t){ hint.style.display='block'; hint.textContent=t; setTimeout(()=>{ if(!mode) hint.style.display='none'; }, 1200); }
 function setIf(id, v){ const el=document.getElementById(id); if (el && editing!==id) el.value = v; }
@@ -183,6 +218,8 @@ async function refresh() {
     setIf('v_room_depth_m', c.room_depth_m);
     const ce = c.closure_error_m;
     document.getElementById('closure').textContent = 'closure: ' + (ce==null ? '-' : ce.toFixed(3)+' m'+(ce<0.1?' OK':' check measurements'));
+    if (!tuningBuilt && s.tuning_specs) buildTuning(s.tuning_specs);
+    if (s.tuning) updateTuning(s.tuning);
     document.getElementById('zone_list').innerHTML = (c.zones||[]).map((z,i)=>
       '<div class="row"><span style="flex:1">'+z.name+' ('+ (z.polygon_px||[]).length +' pts)</span>'+
       '<span class="btn" onclick="delZone('+i+')">x</span></div>').join('');
