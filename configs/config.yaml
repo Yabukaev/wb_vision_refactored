@@ -41,6 +41,9 @@ mqtt:
   queue_size: 500
   publish_tracks_hz: 5.0
   reconnect_delay_sec: 5.0
+  discovery: true            # auto-create entities in Home Assistant
+  discovery_prefix: homeassistant
+  person_slots: 4            # fixed person entities for the floorplan
 
 calibration:
   file: data/calibration.json

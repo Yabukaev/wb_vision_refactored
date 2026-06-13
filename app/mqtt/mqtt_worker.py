@@ -27,10 +27,10 @@ class MqttWorker(threading.Thread):
         self.last_error = ""
         self._client: Optional[mqtt.Client] = None
 
-    def enqueue(self, topic: str, value: Any, retain: bool = False) -> None:
+    def enqueue(self, topic: str, value: Any, retain: bool = False, absolute: bool = False) -> None:
         if not self.enabled:
             return
-        msg = MqttMessage(topic=topic, value=value, retain=retain)
+        msg = MqttMessage(topic=topic, value=value, retain=retain, absolute=absolute)
         try:
             self.queue.put_nowait(msg)
         except queue.Full:
@@ -104,7 +104,7 @@ class MqttWorker(threading.Thread):
     def _publish(self, msg: MqttMessage) -> None:
         if not self.enabled or self._client is None:
             return
-        topic = f"{self.cfg.prefix}/{msg.topic}".replace("//", "/")
+        topic = msg.topic if msg.absolute else f"{self.cfg.prefix}/{msg.topic}".replace("//", "/")
         value = msg.value
         if isinstance(value, (dict, list)):
             value = json.dumps(value, ensure_ascii=False)

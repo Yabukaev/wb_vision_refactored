@@ -59,6 +59,8 @@ class InferenceWorker(threading.Thread):
         self._ram = 0.0
         self._prev_done_ts = time.time()
         self._published_track_ids: set[int] = set()
+        self._slot_by_id: dict[int, int] = {}
+        self._last_zones_pub_ts = 0.0
         self._model_lock = threading.Lock()
         self._pending_pose_model: Optional[str] = None
         self._pending_object_model: Optional[str] = None
@@ -103,6 +105,8 @@ class InferenceWorker(threading.Thread):
         if self.activity_classifier is not None:
             self.activity_classifier.start()
         self._mqtt(f"{self.camera_cfg.id}/status", "online", retain=True)
+        if self.mqtt_cfg.discovery:
+            self._publish_discovery()
         last_seq = 0
 
         while not self.stop_event.is_set():
@@ -177,6 +181,17 @@ class InferenceWorker(threading.Thread):
             self._published_track_ids = current_ids
             for tr in packet.tracks:
                 self._publish_track(tr, packet.source_width, packet.source_height, now)
+            self._publish_person_slots(packet)
+
+        # Zones (in metres + normalised) for a floorplan/SVG card — retained.
+        if self.calibration is not None and now - self._last_zones_pub_ts >= 5.0:
+            self._last_zones_pub_ts = now
+            try:
+                self._mqtt(f"{self.camera_cfg.id}/zones",
+                           json.dumps(self.calibration.zones_world(), ensure_ascii=False),
+                           retain=True)
+            except Exception:
+                pass
 
         if now - self._last_health_ts >= 1.0:
             self._last_health_ts = now
@@ -239,6 +254,65 @@ class InferenceWorker(threading.Thread):
             self._mqtt(f"{base}/y_m", round(tr.geo.y_m, 3))
             self._mqtt(f"{base}/inside_room", "ON" if tr.geo.inside_room else "OFF")
 
-    def _mqtt(self, topic: str, value, retain: bool = False) -> None:
+    def _mqtt(self, topic: str, value, retain: bool = False, absolute: bool = False) -> None:
         if self.mqtt is not None:
-            self.mqtt.enqueue(topic, value, retain=retain)
+            self.mqtt.enqueue(topic, value, retain=retain, absolute=absolute)
+
+    # ── Home Assistant discovery + person slots ────────────────────────────────
+
+    def _publish_discovery(self) -> None:
+        from app.mqtt.discovery import build_discovery_configs
+        for topic, payload in build_discovery_configs(
+            self.camera_cfg.id, self.mqtt_cfg.prefix,
+            self.mqtt_cfg.discovery_prefix, self.mqtt_cfg.person_slots,
+        ):
+            self._mqtt(topic, json.dumps(payload, ensure_ascii=False), retain=True, absolute=True)
+
+    def _assign_slots(self, ids: list[int]) -> dict[int, int]:
+        n = int(self.mqtt_cfg.person_slots)
+        self._slot_by_id = {tid: s for tid, s in self._slot_by_id.items() if tid in ids}
+        used = set(self._slot_by_id.values())
+        for tid in ids:
+            if tid not in self._slot_by_id:
+                for s in range(1, n + 1):
+                    if s not in used:
+                        self._slot_by_id[tid] = s
+                        used.add(s)
+                        break
+        return dict(self._slot_by_id)
+
+    def _publish_person_slots(self, packet: VisionPacket) -> None:
+        n = int(self.mqtt_cfg.person_slots)
+        if n <= 0:
+            return
+        cid = self.camera_cfg.id
+        room_w = room_d = 0.0
+        if self.calibration is not None:
+            cal = self.calibration.snapshot()
+            room_w, room_d = float(cal.room_width_m), float(cal.room_depth_m)
+        by_id = {tr.track_id: tr for tr in packet.tracks}
+        id_by_slot = {s: tid for tid, s in self._assign_slots(list(by_id.keys())).items()}
+        for s in range(1, n + 1):
+            base = f"{cid}/person_slot/{s}"
+            tid = id_by_slot.get(s)
+            if tid is None:
+                self._mqtt(f"{base}/state", "away")
+                self._mqtt(f"{base}/json", json.dumps({"present": False, "slot": s}))
+                continue
+            tr = by_id[tid]
+            p: dict = {
+                "present": True, "slot": s, "id": tid,
+                "pose": tr.state, "motion": tr.motion,
+                "activity": tr.activity or "none",
+                "zone": (tr.geo.zone if tr.geo else "") or "none",
+            }
+            if tr.geo:
+                p["x_m"] = round(tr.geo.x_m, 3)
+                p["y_m"] = round(tr.geo.y_m, 3)
+                p["distance_cam_m"] = round(tr.geo.distance_cam_m, 3)
+                if room_w > 0:
+                    p["x_norm"] = round(min(1.0, max(0.0, tr.geo.x_m / room_w)), 4)
+                if room_d > 0:
+                    p["y_norm"] = round(min(1.0, max(0.0, tr.geo.y_m / room_d)), 4)
+            self._mqtt(f"{base}/json", json.dumps(p, ensure_ascii=False))
+            self._mqtt(f"{base}/state", tr.state)

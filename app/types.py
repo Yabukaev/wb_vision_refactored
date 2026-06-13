@@ -80,4 +80,5 @@ class MqttMessage:
     topic: str
     value: Any
     retain: bool = False
+    absolute: bool = False   # if True, publish topic as-is (skip the prefix)
 

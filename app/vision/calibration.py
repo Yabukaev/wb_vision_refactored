@@ -242,6 +242,31 @@ class CalibrationManager:
             self._invalidate_locked()
             self.save()
 
+    def zones_world(self) -> list[dict]:
+        """Zones with polygons in metres and normalised (0..1 of room) — for a
+        floorplan/SVG card. polygon_m/polygon_norm present only when calibrated."""
+        with self._lock:
+            H = self._homography_locked()
+            zones = list(self.data.zones or [])
+            w = float(self.data.room_width_m)
+            d = float(self.data.room_depth_m)
+        out: list[dict] = []
+        for z in zones:
+            poly_px = z.get("polygon_px", [])
+            item: dict = {"name": z.get("name", ""), "color": z.get("color"),
+                          "polygon_px": poly_px}
+            if H is not None and len(poly_px) >= 3:
+                pm, pn = [], []
+                for p in poly_px:
+                    xm, ym = self._project(H, float(p[0]), float(p[1]))
+                    pm.append([round(xm, 3), round(ym, 3)])
+                    pn.append([round(xm / w, 4) if w > 0 else 0.0,
+                               round(ym / d, 4) if d > 0 else 0.0])
+                item["polygon_m"] = pm
+                item["polygon_norm"] = pn
+            out.append(item)
+        return out
+
     def trapezoid_closure_error(self) -> Optional[float]:
         """Metres mismatch between the walked P4->P1 edge and the entered DA."""
         with self._lock:

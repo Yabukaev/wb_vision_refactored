@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import threading
 
+import json
+
 from app.config import CameraSection, MqttSection, VisionSection
-from app.types import TrackSnapshot, VisionPacket
+from app.types import GeoPoint, TrackSnapshot, VisionPacket
+from app.vision.calibration import CalibrationData
 from app.vision.inference_worker import InferenceWorker
+
+
+class FakeCal:
+    def snapshot(self) -> CalibrationData:
+        return CalibrationData(room_width_m=4.0, room_depth_m=2.0)
 
 
 class FakeMqtt:
     def __init__(self) -> None:
         self.messages: list[tuple[str, object]] = []
 
-    def enqueue(self, topic: str, value, retain: bool = False) -> None:
+    def enqueue(self, topic: str, value, retain: bool = False, absolute: bool = False) -> None:
         self.messages.append((topic, value))
 
 
@@ -108,7 +116,6 @@ def test_track_schema_topics():
 
 
 def test_track_json_has_classification_fields():
-    import json
     fake = FakeMqtt()
     worker = _worker(fake)
     worker._publish(now=1.0, packet=_packet([5]))
@@ -116,3 +123,25 @@ def test_track_json_has_classification_fields():
     for key in ("id", "pose", "motion", "activity", "zone"):
         assert key in payload, f"missing {key}"
     assert payload["pose"] == "standing"
+
+
+def test_person_slots_with_normalized_coords():
+    fake = FakeMqtt()
+    worker = _worker(fake)
+    worker.calibration = FakeCal()  # room 4.0 x 2.0 m
+    tr = TrackSnapshot(
+        track_id=7, box=(0, 0, 50, 100), conf=0.9, foot=(25, 100), center=(25, 50),
+        state="sitting", last_seen=1.0, hits=3, age_sec=1.0,
+        geo=GeoPoint(x_m=2.0, y_m=1.0, distance_m=1.0, inside_room=True,
+                     inside_calibration_zone=True, distance_cam_m=2.2, zone="desk"),
+    )
+    pkt = VisionPacket(frame_id=1, ts=1.0, infer_ms=10.0, inference_fps=4.0,
+                       source_width=640, source_height=480, tracks=[tr], detections_count=1)
+    worker._publish(now=1.0, packet=pkt)
+
+    slot1 = json.loads(next(v for t, v in fake.messages if t == "cam1/person_slot/1/json"))
+    assert slot1["present"] is True and slot1["id"] == 7
+    assert slot1["x_norm"] == 0.5 and slot1["y_norm"] == 0.5  # 2/4, 1/2
+    assert slot1["pose"] == "sitting" and slot1["zone"] == "desk"
+    slot2 = json.loads(next(v for t, v in fake.messages if t == "cam1/person_slot/2/json"))
+    assert slot2["present"] is False

@@ -123,6 +123,9 @@ class MqttSection:
     queue_size: int = 500
     publish_tracks_hz: float = 5.0
     reconnect_delay_sec: float = 5.0
+    discovery: bool = True              # publish Home Assistant MQTT discovery configs
+    discovery_prefix: str = "homeassistant"
+    person_slots: int = 4              # fixed HA person entities for the floorplan
 
 
 @dataclass(slots=True)
