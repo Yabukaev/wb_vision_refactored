@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import threading
@@ -46,8 +46,12 @@ class InferenceWorker(threading.Thread):
         self._last_infer_ts = 0.0
         self._last_health_ts = 0.0
         self._last_tracks_pub_ts = 0.0
+        self._last_psutil_ts = 0.0  # P-04: slow psutil timer
+        self._cpu = 0.0
+        self._ram = 0.0
         self._prev_done_ts = time.time()
         self._published_track_ids: set[int] = set()
+        psutil.cpu_percent(interval=None)  # B-02: primer — first real call returns 0 otherwise
 
     def run(self) -> None:
         self.detector = YoloPoseDetector(self.vision_cfg)
@@ -81,8 +85,7 @@ class InferenceWorker(threading.Thread):
             self._inference_fps = inst_fps if self._inference_fps <= 0 else 0.85 * self._inference_fps + 0.15 * inst_fps
 
             tracks = self.tracker.update(detections, now=now, geo_fn=self.calibration.pixel_to_floor)
-            cpu = psutil.cpu_percent(interval=None)
-            ram = psutil.virtual_memory().percent
+            self._update_system_stats(now)  # P-04: only calls psutil every 2s
             reader_fps = float(self.reader_fps_getter() or 0.0) if self.reader_fps_getter else 0.0
 
             result = VisionPacket(
@@ -94,8 +97,8 @@ class InferenceWorker(threading.Thread):
                 source_height=packet.height,
                 tracks=tracks,
                 detections_count=len(detections),
-                cpu_percent=cpu,
-                ram_percent=ram,
+                cpu_percent=self._cpu,
+                ram_percent=self._ram,
                 reader_fps=reader_fps,
             )
             self.results.set(result)
@@ -103,6 +106,13 @@ class InferenceWorker(threading.Thread):
 
         self._mqtt(f"{self.camera_cfg.id}/status", "offline", retain=True)
         self.results.close()
+
+    def _update_system_stats(self, now: float) -> None:
+        # P-04: psutil polls OS every call; limit to once per 2s
+        if now - self._last_psutil_ts >= 2.0:
+            self._cpu = psutil.cpu_percent(interval=None)
+            self._ram = psutil.virtual_memory().percent
+            self._last_psutil_ts = now
 
     def _publish(self, now: float, packet: VisionPacket) -> None:
         tracks_hz = max(0.2, float(self.mqtt_cfg.publish_tracks_hz))
@@ -114,7 +124,7 @@ class InferenceWorker(threading.Thread):
                 self._publish_gone(gone_id, now)
             self._published_track_ids = current_ids
             for tr in packet.tracks:
-                self._publish_track(tr, packet.source_width, packet.source_height)
+                self._publish_track(tr, packet.source_width, packet.source_height, now)
 
         if now - self._last_health_ts >= 1.0:
             self._last_health_ts = now
@@ -133,10 +143,11 @@ class InferenceWorker(threading.Thread):
         self._mqtt(f"{base}/state", "gone")
         self._mqtt(f"{base}/json", json.dumps({"id": track_id, "state": "gone", "ts": now}))
 
-    def _publish_track(self, tr: TrackSnapshot, fw: int, fh: int) -> None:
+    def _publish_track(self, tr: TrackSnapshot, fw: int, fh: int, now: float) -> None:
+        # B-04: use the passed `now` timestamp instead of calling time.time() again
         cid = self.camera_cfg.id
         fx, fy = tr.foot
-        payload = {
+        payload: dict = {
             "id": tr.track_id,
             "state": tr.state,
             "confidence": round(tr.conf, 3),
@@ -144,7 +155,7 @@ class InferenceWorker(threading.Thread):
             "frame": {"width": fw, "height": fh},
             "hits": tr.hits,
             "age_sec": round(tr.age_sec, 2),
-            "ts": time.time(),
+            "ts": now,
         }
         if tr.geo:
             payload["geo"] = {
@@ -155,20 +166,18 @@ class InferenceWorker(threading.Thread):
                 "inside_calibration_zone": tr.geo.inside_calibration_zone,
             }
 
+        # P-07: serialize JSON once and reuse
+        payload_json = json.dumps(payload, ensure_ascii=False)
         base = f"{cid}/person/{tr.track_id}"
-        self._mqtt(f"{base}/json", json.dumps(payload, ensure_ascii=False))
-        self._mqtt(f"{base}/state", tr.state)
-        self._mqtt(f"{base}/foot_x", fx)
-        self._mqtt(f"{base}/foot_y", fy)
-        self._mqtt(f"{base}/confidence", round(tr.conf, 3))
+        self._mqtt(f"{base}/json", payload_json)   # full payload for most consumers
+        self._mqtt(f"{base}/state", tr.state)       # simple string for HA triggers
+
+        # P-03: expose only the most-used flat geo fields; everything else is in /json
         if tr.geo:
             self._mqtt(f"{base}/x_m", round(tr.geo.x_m, 3))
             self._mqtt(f"{base}/y_m", round(tr.geo.y_m, 3))
-            self._mqtt(f"{base}/distance_axis_m", round(tr.geo.distance_m, 3))
             self._mqtt(f"{base}/inside_room", "ON" if tr.geo.inside_room else "OFF")
-            self._mqtt(f"{base}/inside_calibration_zone", "ON" if tr.geo.inside_calibration_zone else "OFF")
 
     def _mqtt(self, topic: str, value, retain: bool = False) -> None:
         if self.mqtt is not None:
             self.mqtt.enqueue(topic, value, retain=retain)
-
